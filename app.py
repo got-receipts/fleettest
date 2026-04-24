@@ -8172,6 +8172,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
     emergency_messages = support_messages_map(connection, [alert["id"] for alert in emergency_alerts])
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    ticket_route_stop_map_rows = ticket_route_stop_map(connection, [ticket["id"] for ticket in tickets])
+    driver_location_map = latest_driver_locations_map(connection, [ticket["id"] for ticket in tickets])
     blocks = delivery_block_rows(connection)
     route_plan_map = route_plans_map(connection, [block["id"] for block in blocks])
     block_ticket_map = delivery_block_tickets_map(connection, [block["id"] for block in blocks])
@@ -8185,6 +8187,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
     block_options = "".join(f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>" for block in open_blocks)
     cards = []
     for index, ticket in enumerate(tickets):
+        route_stop = ticket_route_stop_map_rows.get(ticket["id"])
+        driver_location = driver_location_map.get(ticket["id"])
         actions = []
         if ticket["status"] == "READY_FOR_PICKUP":
             actions.append(
@@ -8312,6 +8316,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
         """
         maps_link = google_maps_link(ticket["shipping_address"])
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        driver_origin = coordinates_query(driver_location["latitude"], driver_location["longitude"]) if driver_location else ""
+        live_tracking_link = google_maps_directions_link(driver_origin, ticket["shipping_address"]) if driver_origin else ""
         detail_html = f"""
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
@@ -8324,6 +8330,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
+        {render_route_summary(ticket, route_stop, driver_location)}
+        {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(live_tracking_link)}' target='_blank' rel='noopener noreferrer'>Track Driver</a></div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and live_tracking_link else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_tracker(ticket["status"])}
@@ -8370,6 +8378,12 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
                 block_actions += f"<div class='tracker-note warning-note'>Blocks must have exactly {BLOCK_SIZE} tickets before dispatch can submit them to a driver.</div>"
         else:
             block_actions = "<span class='subtle'>This block was already submitted to a driver.</span>"
+        live_ticket = next((ticket for ticket in block_tickets if ticket["status"] == "OUT_FOR_DELIVERY"), None)
+        live_driver_location = driver_location_map.get(live_ticket["id"]) if live_ticket else None
+        live_tracking_link = google_maps_directions_link(
+            coordinates_query(live_driver_location["latitude"], live_driver_location["longitude"]) if live_driver_location else "",
+            live_ticket["shipping_address"] if live_ticket else "",
+        ) if live_ticket and live_driver_location else ""
         block_cards.append(
             f"""
             <article class="order-card">
@@ -8391,6 +8405,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
               <div class="item-pill-list">
                 {''.join(f"<div class='item-pill'><strong>{html.escape(ticket['ticket_number'])}</strong><span>{html.escape(ticket['client_name'])}</span></div>" for ticket in block_tickets) or '<p>No tickets in this block yet.</p>'}
               </div>
+              {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(live_tracking_link)}' target='_blank' rel='noopener noreferrer'>Track Active Driver</a></div>" if live_tracking_link else ""}
               <div class="ticket-actions">{route_actions}{block_actions}</div>
               <div class="chat-thread">
                 {''.join(f"<article class='chat-message'><strong>Stop {stop['stop_sequence']}: {html.escape(stop['ticket_number'])}</strong><p>{html.escape(stop['client_name'])} | ETA {html.escape(stop['eta_at'] or 'TBD')} | {float(stop['leg_distance_miles'] or 0):.1f} mi | {int(stop['leg_duration_minutes'] or 0)} min</p><small>{html.escape(stop['shipping_address'])}</small></article>" for stop in route_stops) or "<p class='subtle'>No route plan generated yet. Build one here first, then replace the planner with VROOM or openrouteservice later.</p>"}
