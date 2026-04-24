@@ -6904,6 +6904,16 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
             "UPDATE coupons SET uses_remaining = CASE WHEN uses_remaining > 0 THEN uses_remaining - 1 ELSE 0 END WHERE id = ?",
             (coupon["id"],),
         )
+    if fulfillment_type == "DELIVERY" and shipping_address.strip():
+        try:
+            resolve_address_coordinates(connection, shipping_address)
+        except RoutePlanningError as exc:
+            append_server_log(
+                "routing",
+                "warning",
+                "Ticket created without saved coordinates",
+                f"Ticket {ticket_number}: {exc}",
+            )
     return ticket_id
 
 
