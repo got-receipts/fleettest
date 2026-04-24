@@ -70,6 +70,7 @@ OPENROUTESERVICE_GEOCODE_URL = (os.environ.get("OPENROUTESERVICE_GEOCODE_URL", "
 VROOM_URL = (os.environ.get("VROOM_URL", "http://127.0.0.1:3000").strip() or "").rstrip("/")
 ROUTE_PROFILE = os.environ.get("BUDHUB_ROUTE_PROFILE", "driving-car").strip() or "driving-car"
 ROUTE_HTTP_TIMEOUT = int(os.environ.get("BUDHUB_ROUTE_TIMEOUT_SECONDS", "12") or "12")
+ROUTE_DEBUG_TOOLS = os.environ.get("BUDHUB_ROUTE_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 LOYALTY_POINTS_PER_DOLLAR = 1
 LOYALTY_POINTS_PER_DISCOUNT_DOLLAR = 20
 DEFAULT_PAYMENT_DESTINATIONS = [
@@ -397,6 +398,17 @@ POSTGRES_CREATE_STATEMENTS = [
         updated_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS driver_locations (
+        id SERIAL PRIMARY KEY,
+        driver_id INTEGER NOT NULL,
+        ticket_id INTEGER NOT NULL,
+        latitude REAL NOT NULL,
+        longitude REAL NOT NULL,
+        accuracy REAL DEFAULT 0,
+        created_at TEXT NOT NULL
+    )
+    """,
 ]
 
 POSTGRES_SYNC_TABLES = [
@@ -423,6 +435,7 @@ POSTGRES_SYNC_TABLES = [
     "route_plans",
     "route_plan_stops",
     "address_coordinates",
+    "driver_locations",
 ]
 
 POSTGRES_SERIAL_TABLES = {
@@ -446,6 +459,7 @@ POSTGRES_SERIAL_TABLES = {
     "route_plans",
     "route_plan_stops",
     "address_coordinates",
+    "driver_locations",
 }
 
 MENU_SECTIONS = ["Flower", "Edibles", "Concentrates", "General"]
@@ -2880,6 +2894,18 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 last_error TEXT,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS driver_locations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                driver_id INTEGER NOT NULL,
+                ticket_id INTEGER NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                accuracy REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
             );
             """
         )
@@ -5941,6 +5967,24 @@ def google_maps_embed_link(address):
     return f"https://www.google.com/maps?{urlencode({'q': address})}&output=embed"
 
 
+def google_maps_directions_link(origin, destination, waypoints=None):
+    origin = (origin or "").strip()
+    destination = (destination or "").strip()
+    if not origin or not destination:
+        return ""
+    payload = {"api": 1, "origin": origin, "destination": destination, "travelmode": "driving"}
+    clean_waypoints = [item.strip() for item in (waypoints or []) if item and item.strip()]
+    if clean_waypoints:
+        payload["waypoints"] = "|".join(clean_waypoints)
+    return f"https://www.google.com/maps/dir/?{urlencode(payload)}"
+
+
+def coordinates_query(latitude, longitude):
+    if latitude is None or longitude is None:
+        return ""
+    return f"{float(latitude):.6f},{float(longitude):.6f}"
+
+
 def render_address_input(field_name, field_id, placeholder, value=""):
     maps_link = google_maps_link(value)
     maps_embed = google_maps_embed_link(value)
@@ -6004,6 +6048,21 @@ def render_item_list(items):
         f"<div class='item-pill'><strong>{html.escape(item['product_name'])}</strong><span>{item['quantity']} x {format_money(item['locked_price'])}</span></div>"
         for item in items
     ) + "</div>"
+
+
+def render_route_summary(ticket, route_stop=None, driver_location=None, customer_view=False):
+    fragments = []
+    if route_stop:
+        fragments.append(f"<span>Stop #{int(route_stop['stop_sequence'])}</span>")
+        fragments.append(f"<span>ETA: {html.escape(route_stop['eta_at'] or 'TBD')}</span>")
+    if ticket.get("driver_name"):
+        fragments.append(f"<span>Driver: {html.escape(ticket['driver_name'])}</span>")
+    if driver_location:
+        fragments.append(f"<span>Driver Last Ping: {html.escape(driver_location['created_at'])}</span>")
+    if not fragments:
+        return ""
+    tone = "tracker-note" if customer_view else "order-meta"
+    return f"<div class='{tone}'>{''.join(fragments)}</div>"
 
 
 def render_ticket_review_forms(connection, user, ticket, items):
@@ -6295,6 +6354,44 @@ def route_plan_stops_map(connection, block_ids):
     for row in rows:
         grouped.setdefault(row["delivery_block_id"], []).append(row)
     return grouped
+
+
+def ticket_route_stop_map(connection, ticket_ids):
+    if not ticket_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ticket_ids)
+    rows = connection.execute(
+        f"""
+        SELECT route_plan_stops.*,
+               route_plans.delivery_block_id,
+               route_plans.provider AS route_provider
+        FROM route_plan_stops
+        JOIN route_plans ON route_plans.id = route_plan_stops.route_plan_id
+        WHERE route_plan_stops.ticket_id IN ({placeholders})
+        """,
+        tuple(ticket_ids),
+    ).fetchall()
+    return {row["ticket_id"]: row for row in rows}
+
+
+def latest_driver_locations_map(connection, ticket_ids):
+    if not ticket_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ticket_ids)
+    rows = connection.execute(
+        f"""
+        SELECT dl.*
+        FROM driver_locations AS dl
+        JOIN (
+            SELECT ticket_id, MAX(id) AS latest_id
+            FROM driver_locations
+            WHERE ticket_id IN ({placeholders})
+            GROUP BY ticket_id
+        ) latest ON latest.latest_id = dl.id
+        """,
+        tuple(ticket_ids),
+    ).fetchall()
+    return {row["ticket_id"]: row for row in rows}
 
 
 def delete_route_plan_for_block(connection, block_id):
@@ -7752,12 +7849,16 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
     tickets = ticket_rows(connection, "WHERE tickets.client_id = ?", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    route_stop_map = ticket_route_stop_map(connection, [ticket["id"] for ticket in tickets])
+    driver_location_map = latest_driver_locations_map(connection, [ticket["id"] for ticket in tickets])
     open_ticket = next((ticket for ticket in tickets if str(ticket["id"]) == str(open_ticket_id)), None)
     open_count = sum(1 for ticket in tickets if ticket["status"] not in {"DELIVERED", "CANCELED"})
     delivered_count = sum(1 for ticket in tickets if ticket["status"] == "DELIVERED")
     outstanding_total = sum(ticket_due_amount(ticket) for ticket in tickets if ticket["status"] not in {"CANCELED", "DELIVERED"})
     cards = []
     for index, ticket in enumerate(tickets):
+        route_stop = route_stop_map.get(ticket["id"])
+        driver_location = driver_location_map.get(ticket["id"])
         notes = ""
         if ticket["review_reason"]:
             notes += f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>"
@@ -7776,10 +7877,13 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Driver: {html.escape(ticket["driver_name"] or 'Pending dispatch')}</span>
         </div>
         """
         maps_link = google_maps_link(ticket["shipping_address"])
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        driver_origin = coordinates_query(driver_location["latitude"], driver_location["longitude"]) if driver_location else ""
+        driver_directions = google_maps_directions_link(driver_origin, ticket["shipping_address"]) if driver_origin else ""
         detail_html = f"""
         <div class="order-meta">
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
@@ -7790,6 +7894,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
           <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address / Pickup: {html.escape(ticket["shipping_address"])}</span>
+          <span>Driver: {html.escape(ticket["driver_name"] or 'Pending dispatch')}</span>
         </div>
         <div class="order-meta">
           <span>Coupon: {html.escape(ticket["coupon_code"] or "None")}</span>
@@ -7799,7 +7904,10 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Loyalty Earned: {int(ticket["loyalty_points_awarded"] or 0)} pts</span>
           <span>Credits Used: {format_money(ticket["credit_applied"])}</span>
         </div>
+        {render_route_summary(ticket, route_stop, driver_location, customer_view=True)}
         {render_payment_instructions(ticket)}
+        {f"<div class='tracker-note'>Driver is on the way. Last location update: {html.escape(driver_location['created_at'])}</div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_location else ""}
+        {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(driver_directions)}' target='_blank' rel='noopener noreferrer'>Track Driver Route</a></div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_directions else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_ticket_review_forms(connection, user, ticket, items_map.get(ticket["id"], []))}
@@ -8295,7 +8403,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
       <div class="stat-card"><span>Active Tickets</span><strong>{sum(1 for ticket in tickets if ticket['status'] != 'CANCELED')}</strong></div>
       <div class="stat-card"><span>Emergency Alerts</span><strong>{len(emergency_alerts)}</strong></div>
     </section>
-    <section class="panel">
+    {'<section class="panel">' if ROUTE_DEBUG_TOOLS else ''}
+    {f'''
       <h2>Route Planning Layer</h2>
       <div class="order-meta">
         <span>BudHub is still the system of record for tickets, blocks, drivers, and status.</span>
@@ -8356,6 +8465,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
         ) or "<p class='subtle'>All active dispatch addresses already have coordinates, or BudHub can infer them from inline values like @42.65,-73.75.</p>"}
       </div>
     </section>
+    ''' if ROUTE_DEBUG_TOOLS else ''}
     <section class="panel">
       <h2>Emergency Alerts</h2>
       <div class="order-card-grid">
@@ -8502,10 +8612,14 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     driver_ticket_ids = [ticket["id"] for ticket in tickets] + [ticket["id"] for ticket in history_tickets]
     items_map = ticket_items_map(connection, driver_ticket_ids)
     message_map = order_messages_map(connection, driver_ticket_ids)
+    route_stop_map = ticket_route_stop_map(connection, [ticket["id"] for ticket in tickets])
+    block_route_map = route_plan_stops_map(connection, list({ticket["delivery_block_id"] for ticket in tickets if ticket["delivery_block_id"]}))
     block_names = sorted({ticket["delivery_block_name"] for ticket in tickets if ticket["delivery_block_name"]})
     active_ticket_number = next((ticket["ticket_number"] for ticket in tickets if ticket["status"] == "OUT_FOR_DELIVERY"), "")
     cards = []
     for index, ticket in enumerate(tickets):
+        route_stop = route_stop_map.get(ticket["id"])
+        block_stops = block_route_map.get(ticket["delivery_block_id"], []) if ticket["delivery_block_id"] else []
         button = "Start Route" if ticket["status"] == "DRIVER_ASSIGNED" else "Mark Delivered"
         action = "start_route" if ticket["status"] == "DRIVER_ASSIGNED" else "deliver_order"
         modal_id = f"driver-ticket-{ticket['id']}-{index}"
@@ -8520,9 +8634,14 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
           <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
         </div>
+        {render_route_summary(ticket, route_stop)}
         """
         maps_link = google_maps_link(ticket["shipping_address"])
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        route_link = ""
+        if block_stops:
+            ordered_addresses = [stop["shipping_address"] for stop in block_stops]
+            route_link = google_maps_directions_link(DISPATCH_HUB_ADDRESS, ordered_addresses[-1], ordered_addresses[:-1]) if len(ordered_addresses) > 1 else google_maps_directions_link(DISPATCH_HUB_ADDRESS, ordered_addresses[0])
         detail_html = f"""
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
@@ -8537,7 +8656,9 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
+        {render_route_summary(ticket, route_stop)}
         {render_payment_instructions(ticket)}
+        {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(route_link)}' target='_blank' rel='noopener noreferrer'>Open Full Route</a></div>" if route_link else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
@@ -8614,6 +8735,34 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-card-grid">{''.join(history_cards) if history_cards else '<p>No completed driver history yet.</p>'}</div>
       </div>
     </div>
+    <script>
+      (function () {{
+        if (!navigator.geolocation) {{
+          return;
+        }}
+        var activeTicketId = {json.dumps(next((ticket["id"] for ticket in tickets if ticket["status"] == "OUT_FOR_DELIVERY"), 0))};
+        if (!activeTicketId) {{
+          return;
+        }}
+        function sendPing(position) {{
+          var payload = new URLSearchParams();
+          payload.set('order_id', String(activeTicketId));
+          payload.set('latitude', String(position.coords.latitude));
+          payload.set('longitude', String(position.coords.longitude));
+          payload.set('accuracy', String(position.coords.accuracy || 0));
+          fetch('/driver/location', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }},
+            body: payload.toString()
+          }}).catch(function () {{}});
+        }}
+        navigator.geolocation.watchPosition(sendPing, function () {{}}, {{
+          enableHighAccuracy: true,
+          maximumAge: 15000,
+          timeout: 12000
+        }});
+      }})();
+    </script>
     """
     return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_driver_emergency_widget_script())
 
@@ -9621,6 +9770,34 @@ def handle_order_chat(environ, start_response, connection, user):
     return redirect(start_response, f"/dashboard?message=Order message sent&open_ticket={ticket_id}")
 
 
+def handle_driver_location(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"driver"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    ticket_id = int(data.get("order_id", "0") or 0)
+    ticket = single_ticket(connection, ticket_id)
+    if not ticket or ticket["driver_id"] != user["id"] or ticket["status"] != "OUT_FOR_DELIVERY":
+        return json_response(start_response, {"ok": False, "error": "Ticket not eligible for live tracking"}, status="400 Bad Request")
+    try:
+        latitude = float(data.get("latitude", "").strip())
+        longitude = float(data.get("longitude", "").strip())
+        accuracy = float(data.get("accuracy", "0").strip() or 0)
+    except ValueError:
+        return json_response(start_response, {"ok": False, "error": "Invalid coordinates"}, status="400 Bad Request")
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return json_response(start_response, {"ok": False, "error": "Coordinates out of range"}, status="400 Bad Request")
+    connection.execute(
+        """
+        INSERT INTO driver_locations (driver_id, ticket_id, latitude, longitude, accuracy, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user["id"], ticket_id, latitude, longitude, accuracy, now_iso()),
+    )
+    connection.commit()
+    return json_response(start_response, {"ok": True})
+
+
 def handle_update_order(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"banker", "dispatcher", "picker", "driver", "client"})
     if gate:
@@ -10289,6 +10466,8 @@ def application(environ, start_response):
             return handle_browser_console_log(environ, start_response, user)
         if path == "/engineer/console-events" and method == "GET":
             return serve_engineer_console_events(environ, start_response, user)
+        if path == "/driver/location" and method == "POST":
+            return handle_driver_location(environ, start_response, connection, user)
         if path not in {"/engineer/console-events", "/engineer/browser-log"}:
             append_server_log("request", "info", f"{method} {path}", user=user, environ=environ)
         if user and account_restricted(user) and path not in {"/dashboard", "/logout", "/help"}:
