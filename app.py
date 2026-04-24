@@ -6051,12 +6051,19 @@ def render_item_list(items):
 
 
 def render_route_summary(ticket, route_stop=None, driver_location=None, customer_view=False):
+    driver_name = ""
+    if ticket is not None:
+        try:
+            driver_name = ticket["driver_name"] or ""
+        except (KeyError, IndexError, TypeError):
+            if isinstance(ticket, dict):
+                driver_name = ticket.get("driver_name", "") or ""
     fragments = []
     if route_stop:
         fragments.append(f"<span>Stop #{int(route_stop['stop_sequence'])}</span>")
         fragments.append(f"<span>ETA: {html.escape(route_stop['eta_at'] or 'TBD')}</span>")
-    if ticket.get("driver_name"):
-        fragments.append(f"<span>Driver: {html.escape(ticket['driver_name'])}</span>")
+    if driver_name:
+        fragments.append(f"<span>Driver: {html.escape(driver_name)}</span>")
     if driver_location:
         fragments.append(f"<span>Driver Last Ping: {html.escape(driver_location['created_at'])}</span>")
     if not fragments:
