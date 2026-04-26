@@ -7040,7 +7040,7 @@ def auto_process_dispatch_queue(connection, fallback_dispatcher_id=None):
         return
     ready_tickets = ticket_rows(
         connection,
-        "WHERE tickets.status = 'READY_FOR_DISPATCH' AND tickets.fulfillment_type = 'DELIVERY' ORDER BY tickets.created_at ASC, tickets.id ASC",
+        "WHERE tickets.status = 'READY_FOR_DISPATCH' AND tickets.fulfillment_type = 'DELIVERY'",
         (),
     )
     open_blocks = [block for block in delivery_block_rows(connection) if block["status"] == "OPEN"]
