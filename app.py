@@ -67,10 +67,12 @@ DISPATCH_HUB_ADDRESS = os.environ.get("BUDHUB_DISPATCH_HUB_ADDRESS", "518 Centra
 OPENROUTESERVICE_URL = (os.environ.get("OPENROUTESERVICE_URL", "http://127.0.0.1:8082/ors").strip() or "").rstrip("/")
 OPENROUTESERVICE_API_KEY = os.environ.get("OPENROUTESERVICE_API_KEY", "").strip()
 OPENROUTESERVICE_GEOCODE_URL = (os.environ.get("OPENROUTESERVICE_GEOCODE_URL", "https://api.openrouteservice.org/geocode/search").strip() or "").rstrip("/")
+OPENROUTESERVICE_REVERSE_GEOCODE_URL = (os.environ.get("OPENROUTESERVICE_REVERSE_GEOCODE_URL", "https://api.openrouteservice.org/geocode/reverse").strip() or "").rstrip("/")
 VROOM_URL = (os.environ.get("VROOM_URL", "http://127.0.0.1:3000").strip() or "").rstrip("/")
 ROUTE_PROFILE = os.environ.get("BUDHUB_ROUTE_PROFILE", "driving-car").strip() or "driving-car"
 ROUTE_HTTP_TIMEOUT = int(os.environ.get("BUDHUB_ROUTE_TIMEOUT_SECONDS", "12") or "12")
 ROUTE_DEBUG_TOOLS = os.environ.get("BUDHUB_ROUTE_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+DRIVER_RETURN_BUFFER_MINUTES = int(os.environ.get("BUDHUB_DRIVER_RETURN_BUFFER_MINUTES", "10") or "10")
 LOYALTY_POINTS_PER_DOLLAR = 1
 LOYALTY_POINTS_PER_DISCOUNT_DOLLAR = 20
 DEFAULT_PAYMENT_DESTINATIONS = [
@@ -406,6 +408,7 @@ POSTGRES_CREATE_STATEMENTS = [
         latitude REAL NOT NULL,
         longitude REAL NOT NULL,
         accuracy REAL DEFAULT 0,
+        address_label TEXT,
         created_at TEXT NOT NULL
     )
     """,
@@ -901,6 +904,17 @@ def init_postgres_db():
 
 def now_iso():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def compact_log_value(value, limit=900):
@@ -2903,6 +2917,7 @@ def init_db():
                 latitude REAL NOT NULL,
                 longitude REAL NOT NULL,
                 accuracy REAL DEFAULT 0,
+                address_label TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
@@ -2964,6 +2979,7 @@ def init_db():
         ensure_column(connection, "address_coordinates", "provider TEXT NOT NULL DEFAULT 'MANUAL'")
         ensure_column(connection, "address_coordinates", "status TEXT NOT NULL DEFAULT 'PENDING'")
         ensure_column(connection, "address_coordinates", "last_error TEXT")
+        ensure_column(connection, "driver_locations", "address_label TEXT")
 
         seed_leafly_strains(connection)
         seed_payment_destinations(connection)
@@ -6050,7 +6066,7 @@ def render_item_list(items):
     ) + "</div>"
 
 
-def render_route_summary(ticket, route_stop=None, driver_location=None, customer_view=False):
+def render_route_summary(ticket, route_stop=None, driver_location=None, customer_view=False, live_eta_minutes=None):
     driver_name = ""
     if ticket is not None:
         try:
@@ -6065,6 +6081,10 @@ def render_route_summary(ticket, route_stop=None, driver_location=None, customer
     if driver_name:
         fragments.append(f"<span>Driver: {html.escape(driver_name)}</span>")
     if driver_location:
+        if driver_location["address_label"]:
+            fragments.append(f"<span>Driver At: {html.escape(driver_location['address_label'])}</span>")
+        if live_eta_minutes is not None:
+            fragments.append(f"<span>Live ETA: {int(live_eta_minutes)} min</span>")
         fragments.append(f"<span>Driver Last Ping: {html.escape(driver_location['created_at'])}</span>")
     if not fragments:
         return ""
@@ -6278,6 +6298,20 @@ def create_delivery_block(connection, dispatcher_id):
     return cursor.lastrowid
 
 
+def automation_dispatcher_user_id(connection, fallback_user_id=None):
+    dispatcher = connection.execute(
+        "SELECT id FROM users WHERE role = 'dispatcher' ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    if dispatcher:
+        return dispatcher["id"]
+    admin = connection.execute(
+        "SELECT id FROM users WHERE role IN ('admin', 'helpdesk') ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    if admin:
+        return admin["id"]
+    return fallback_user_id or 0
+
+
 def delivery_block_rows(connection, where_clause="", params=()):
     return connection.execute(
         f"""
@@ -6422,6 +6456,22 @@ def route_sort_key(ticket):
     )
 
 
+def distance_from_dispatch_hub_sort_key(connection, tickets):
+    try:
+        coordinates_by_ticket, hub_coordinates = resolve_route_coordinates(connection, tickets)
+    except RoutePlanningError:
+        return None
+    return {
+        ticket["id"]: haversine_meters(
+            hub_coordinates["latitude"],
+            hub_coordinates["longitude"],
+            coordinates_by_ticket[ticket["id"]]["latitude"],
+            coordinates_by_ticket[ticket["id"]]["longitude"],
+        )
+        for ticket in tickets
+    }
+
+
 def parse_route_plan_metadata(plan):
     if not plan or not plan["metadata_json"]:
         return {}
@@ -6553,6 +6603,30 @@ def geocode_address_via_ors(address_text):
     return {"latitude": float(coordinates[1]), "longitude": float(coordinates[0]), "provider": "OPENROUTESERVICE_GEOCODER"}
 
 
+def reverse_geocode_coordinates(latitude, longitude):
+    if not OPENROUTESERVICE_REVERSE_GEOCODE_URL or not OPENROUTESERVICE_API_KEY:
+        return ""
+    query = urlencode(
+        {
+            "api_key": OPENROUTESERVICE_API_KEY,
+            "point.lon": f"{float(longitude):.6f}",
+            "point.lat": f"{float(latitude):.6f}",
+            "size": 1,
+        }
+    )
+    payload = routing_json_request(f"{OPENROUTESERVICE_REVERSE_GEOCODE_URL}?{query}", payload=None, method="GET")
+    features = payload.get("features") or []
+    if not features:
+        return ""
+    properties = features[0].get("properties") or {}
+    return (
+        properties.get("label")
+        or properties.get("name")
+        or properties.get("street")
+        or ""
+    ).strip()
+
+
 def resolve_address_coordinates(connection, address_text):
     normalized_address = (address_text or "").strip()
     if not normalized_address:
@@ -6596,8 +6670,28 @@ def resolve_route_coordinates(connection, tickets):
     return resolved, hub_coordinates
 
 
-def build_native_route_plan_stops(tickets):
-    ordered = sorted(tickets, key=route_sort_key)
+def estimate_driver_eta_minutes(connection, ticket, driver_location):
+    if not ticket or not driver_location:
+        return None
+    try:
+        destination = resolve_address_coordinates(connection, ticket["shipping_address"])
+    except RoutePlanningError:
+        return None
+    distance_meters = haversine_meters(
+        float(driver_location["latitude"]),
+        float(driver_location["longitude"]),
+        destination["latitude"],
+        destination["longitude"],
+    )
+    return max(1, int(round((distance_meters * 0.000621371 / 25.0) * 60.0)))
+
+
+def build_native_route_plan_stops(connection, tickets):
+    distance_map = distance_from_dispatch_hub_sort_key(connection, tickets)
+    if distance_map:
+        ordered = sorted(tickets, key=lambda ticket: (distance_map.get(ticket["id"], 0), ticket["created_at"], ticket["id"]))
+    else:
+        ordered = sorted(tickets, key=route_sort_key)
     departure_at = datetime.now().replace(second=0, microsecond=0)
     stops = []
     total_distance = 0.0
@@ -6779,8 +6873,8 @@ def plan_route_with_vroom(connection, tickets):
     }
 
 
-def native_route_plan_result(tickets, requested_provider, warning=""):
-    ordered_tickets, total_distance, total_duration, stops = build_native_route_plan_stops(tickets)
+def native_route_plan_result(connection, tickets, requested_provider, warning=""):
+    ordered_tickets, total_distance, total_duration, stops = build_native_route_plan_stops(connection, tickets)
     metadata = {
         "planner": "budhub-native",
         "provider_requested": requested_provider,
@@ -6855,6 +6949,135 @@ def persist_route_plan(connection, block_id, requested_provider, plan_result):
     return route_plan_for_block(connection, block_id)
 
 
+def driver_recently_returned(connection, driver_id, buffer_minutes=DRIVER_RETURN_BUFFER_MINUTES):
+    latest_delivery = connection.execute(
+        """
+        SELECT updated_at
+        FROM tickets
+        WHERE driver_id = ? AND status = 'DELIVERED'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (driver_id,),
+    ).fetchone()
+    delivered_at = parse_iso_datetime(latest_delivery["updated_at"]) if latest_delivery else None
+    if not delivered_at:
+        return False
+    return (datetime.utcnow() - delivered_at) < timedelta(minutes=buffer_minutes)
+
+
+def auto_assignable_drivers(connection):
+    drivers = connection.execute(
+        "SELECT id, name FROM users WHERE role = 'driver' ORDER BY name, id"
+    ).fetchall()
+    if not drivers:
+        return []
+    clocked_in_ids = {
+        row["user_id"]
+        for row in connection.execute(
+            "SELECT user_id FROM time_clock_entries WHERE clock_out_at IS NULL"
+        ).fetchall()
+    }
+    if clocked_in_ids:
+        drivers = [driver for driver in drivers if driver["id"] in clocked_in_ids]
+    if not drivers:
+        return []
+    active_counts = {
+        row["driver_id"]: row["active_count"]
+        for row in connection.execute(
+            """
+            SELECT driver_id, COUNT(*) AS active_count
+            FROM tickets
+            WHERE driver_id IS NOT NULL AND status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')
+            GROUP BY driver_id
+            """
+        ).fetchall()
+    }
+    available = [driver for driver in drivers if active_counts.get(driver["id"], 0) == 0]
+    if len(available) <= 1:
+        return available or drivers[:1]
+    cooled_down = [driver for driver in available if not driver_recently_returned(connection, driver["id"])]
+    return cooled_down or available
+
+
+def submit_block_to_driver(connection, block_id, driver_id, dispatcher_id, automated=False):
+    block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+    driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (driver_id,)).fetchone()
+    if not block or block["status"] != "OPEN" or not driver:
+        return False
+    block_tickets = connection.execute(
+        "SELECT id FROM tickets WHERE delivery_block_id = ? AND status = 'READY_FOR_DISPATCH' ORDER BY created_at ASC, id ASC",
+        (block_id,),
+    ).fetchall()
+    if len(block_tickets) != BLOCK_SIZE:
+        return False
+    upsert_route_plan_for_block(connection, block_id, block["route_provider"])
+    connection.execute(
+        "UPDATE delivery_blocks SET driver_id = ?, status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ?",
+        (driver["id"], now_iso(), now_iso(), block_id),
+    )
+    block_name = block["block_name"]
+    for block_ticket in block_tickets:
+        update_ticket(
+            connection,
+            block_ticket["id"],
+            status="DRIVER_ASSIGNED",
+            driver_id=driver["id"],
+            dispatcher_id=dispatcher_id,
+            internal_note=f"{'Auto-dispatched' if automated else 'Submitted'} in {block_name}",
+        )
+    actor = connection.execute("SELECT * FROM users WHERE id = ?", (dispatcher_id,)).fetchone()
+    if actor:
+        increment_user_stat(connection, dispatcher_id, "total_orders_dispatched", len(block_tickets))
+        action_name = "AUTO_SUBMIT_BLOCK" if automated else "SUBMIT_BLOCK"
+        log_activity(connection, actor, action_name, f"{'Auto-submitted' if automated else 'Submitted'} block {block_name} with {len(block_tickets)} tickets to driver {driver['name']}.")
+    return True
+
+
+def auto_process_dispatch_queue(connection, fallback_dispatcher_id=None):
+    dispatcher_id = automation_dispatcher_user_id(connection, fallback_dispatcher_id)
+    if not dispatcher_id:
+        return
+    ready_tickets = ticket_rows(
+        connection,
+        "WHERE tickets.status = 'READY_FOR_DISPATCH' AND tickets.fulfillment_type = 'DELIVERY' ORDER BY tickets.created_at ASC, tickets.id ASC",
+        (),
+    )
+    open_blocks = [block for block in delivery_block_rows(connection) if block["status"] == "OPEN"]
+    for ticket in ready_tickets:
+        if ticket["delivery_block_id"]:
+            continue
+        target_block = next((block for block in open_blocks if int(block["active_ticket_count"] or 0) < BLOCK_SIZE), None)
+        if not target_block:
+            block_id = create_delivery_block(connection, dispatcher_id)
+            target_block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+            open_blocks.append(target_block)
+        update_ticket(
+            connection,
+            ticket["id"],
+            delivery_block_id=target_block["id"],
+            dispatcher_id=dispatcher_id,
+            internal_note=f"Auto-assigned to block {target_block['block_name']}",
+        )
+        refresh_delivery_block_status(connection, target_block["id"])
+        refreshed = next((block for block in delivery_block_rows(connection) if block["id"] == target_block["id"]), None)
+        if refreshed:
+            open_blocks = [refreshed if block["id"] == refreshed["id"] else block for block in open_blocks]
+    available_drivers = auto_assignable_drivers(connection)
+    if not available_drivers:
+        return
+    driver_index = 0
+    for block in delivery_block_rows(connection):
+        if block["status"] != "OPEN" or int(block["active_ticket_count"] or 0) != BLOCK_SIZE:
+            continue
+        driver = available_drivers[min(driver_index, len(available_drivers) - 1)]
+        if submit_block_to_driver(connection, block["id"], driver["id"], dispatcher_id, automated=True):
+            driver_index += 1
+            available_drivers = auto_assignable_drivers(connection)
+            if not available_drivers:
+                break
+
+
 def upsert_route_plan_for_block(connection, block_id, provider=None):
     block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
     if not block:
@@ -6878,12 +7101,12 @@ def upsert_route_plan_for_block(connection, block_id, provider=None):
         elif requested_provider == "OPENROUTESERVICE":
             plan_result = plan_route_with_openrouteservice(connection, tickets)
         elif requested_provider == "GRAPHHOPPER":
-            plan_result = native_route_plan_result(tickets, requested_provider, "GraphHopper is not wired yet in this repo, so BudHub native planning was used.")
+            plan_result = native_route_plan_result(connection, tickets, requested_provider, "GraphHopper is not wired yet in this repo, so BudHub native planning was used.")
         else:
-            plan_result = native_route_plan_result(tickets, requested_provider)
+            plan_result = native_route_plan_result(connection, tickets, requested_provider)
     except RoutePlanningError as exc:
         append_server_log("routing", "warning", "External route planning fallback", str(exc))
-        plan_result = native_route_plan_result(tickets, requested_provider, f"Requested {route_provider_label(requested_provider)} but fell back to BudHub Native: {exc}")
+        plan_result = native_route_plan_result(connection, tickets, requested_provider, f"Requested {route_provider_label(requested_provider)} but fell back to BudHub Native: {exc}")
     return persist_route_plan(connection, block_id, requested_provider, plan_result)
 
 
@@ -7866,6 +8089,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
     for index, ticket in enumerate(tickets):
         route_stop = route_stop_map.get(ticket["id"])
         driver_location = driver_location_map.get(ticket["id"])
+        live_eta_minutes = estimate_driver_eta_minutes(connection, ticket, driver_location) if ticket["status"] == "OUT_FOR_DELIVERY" and driver_location else None
         notes = ""
         if ticket["review_reason"]:
             notes += f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>"
@@ -7889,8 +8113,6 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         """
         maps_link = google_maps_link(ticket["shipping_address"])
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
-        driver_origin = coordinates_query(driver_location["latitude"], driver_location["longitude"]) if driver_location else ""
-        driver_directions = google_maps_directions_link(driver_origin, ticket["shipping_address"]) if driver_origin else ""
         detail_html = f"""
         <div class="order-meta">
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
@@ -7911,10 +8133,9 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Loyalty Earned: {int(ticket["loyalty_points_awarded"] or 0)} pts</span>
           <span>Credits Used: {format_money(ticket["credit_applied"])}</span>
         </div>
-        {render_route_summary(ticket, route_stop, driver_location, customer_view=True)}
+        {render_route_summary(ticket, route_stop, driver_location, customer_view=True, live_eta_minutes=live_eta_minutes)}
         {render_payment_instructions(ticket)}
         {f"<div class='tracker-note'>Driver is on the way. Last location update: {html.escape(driver_location['created_at'])}</div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_location else ""}
-        {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(driver_directions)}' target='_blank' rel='noopener noreferrer'>Track Driver Route</a></div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_directions else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_ticket_review_forms(connection, user, ticket, items_map.get(ticket["id"], []))}
@@ -8112,7 +8333,6 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
-    {render_banker_verified_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Waiting for Verification</span><strong>{sum(1 for ticket in tickets if ticket['payment_status'] == 'PENDING' and ticket['status'] not in {'CANCELED', 'DELIVERED'})}</strong></div>
       <div class="stat-card"><span>Tickets on Desk</span><strong>{len(tickets)}</strong></div>
@@ -8189,6 +8409,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
     for index, ticket in enumerate(tickets):
         route_stop = ticket_route_stop_map_rows.get(ticket["id"])
         driver_location = driver_location_map.get(ticket["id"])
+        live_eta_minutes = estimate_driver_eta_minutes(connection, ticket, driver_location) if ticket["status"] == "OUT_FOR_DELIVERY" and driver_location else None
         actions = []
         if ticket["status"] == "READY_FOR_PICKUP":
             actions.append(
@@ -8302,6 +8523,16 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
                 </form>
                 """
             )
+        if ticket["payment_status"] == "PENDING" and ticket["status"] not in {"DELIVERED", "CANCELED"}:
+            actions.append(
+                f"""
+                <form method="post" action="/orders/update" class="action-stack">
+                  <input type="hidden" name="order_id" value="{ticket["id"]}">
+                  <input type="hidden" name="action" value="verify_payment">
+                  <button type="submit">Verify Payment</button>
+                </form>
+                """
+            )
         modal_id = f"dispatch-ticket-{ticket['id']}-{index}"
         summary_html = f"""
         <div class="order-card-head">
@@ -8316,8 +8547,6 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
         """
         maps_link = google_maps_link(ticket["shipping_address"])
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
-        driver_origin = coordinates_query(driver_location["latitude"], driver_location["longitude"]) if driver_location else ""
-        live_tracking_link = google_maps_directions_link(driver_origin, ticket["shipping_address"]) if driver_origin else ""
         detail_html = f"""
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
@@ -8330,8 +8559,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
-        {render_route_summary(ticket, route_stop, driver_location)}
-        {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(live_tracking_link)}' target='_blank' rel='noopener noreferrer'>Track Driver</a></div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and live_tracking_link else ""}
+        {render_route_summary(ticket, route_stop, driver_location, live_eta_minutes=live_eta_minutes)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_tracker(ticket["status"])}
@@ -8378,12 +8606,6 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
                 block_actions += f"<div class='tracker-note warning-note'>Blocks must have exactly {BLOCK_SIZE} tickets before dispatch can submit them to a driver.</div>"
         else:
             block_actions = "<span class='subtle'>This block was already submitted to a driver.</span>"
-        live_ticket = next((ticket for ticket in block_tickets if ticket["status"] == "OUT_FOR_DELIVERY"), None)
-        live_driver_location = driver_location_map.get(live_ticket["id"]) if live_ticket else None
-        live_tracking_link = google_maps_directions_link(
-            coordinates_query(live_driver_location["latitude"], live_driver_location["longitude"]) if live_driver_location else "",
-            live_ticket["shipping_address"] if live_ticket else "",
-        ) if live_ticket and live_driver_location else ""
         block_cards.append(
             f"""
             <article class="order-card">
@@ -8405,7 +8627,6 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
               <div class="item-pill-list">
                 {''.join(f"<div class='item-pill'><strong>{html.escape(ticket['ticket_number'])}</strong><span>{html.escape(ticket['client_name'])}</span></div>" for ticket in block_tickets) or '<p>No tickets in this block yet.</p>'}
               </div>
-              {f"<div class='ticket-actions'><a class='button ghost' href='{html.escape(live_tracking_link)}' target='_blank' rel='noopener noreferrer'>Track Active Driver</a></div>" if live_tracking_link else ""}
               <div class="ticket-actions">{route_actions}{block_actions}</div>
               <div class="chat-thread">
                 {''.join(f"<article class='chat-message'><strong>Stop {stop['stop_sequence']}: {html.escape(stop['ticket_number'])}</strong><p>{html.escape(stop['client_name'])} | ETA {html.escape(stop['eta_at'] or 'TBD')} | {float(stop['leg_distance_miles'] or 0):.1f} mi | {int(stop['leg_duration_minutes'] or 0)} min</p><small>{html.escape(stop['shipping_address'])}</small></article>" for stop in route_stops) or "<p class='subtle'>No route plan generated yet. Build one here first, then replace the planner with VROOM or openrouteservice later.</p>"}
@@ -8617,8 +8838,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
-    {render_banker_verified_widget(message)}
-    {render_picker_packed_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Ready to Pack</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'PACKING')}</strong></div>
       <div class="stat-card"><span>Visible Tickets</span><strong>{len(tickets)}</strong></div>
@@ -8732,9 +8951,6 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
-    {render_banker_verified_widget(message)}
-    {render_payment_block_widget(message)}
-    {render_driver_action_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Assigned Blocks</span><strong>{len(block_names)}</strong></div>
       <div class="stat-card"><span>Assigned Routes</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'DRIVER_ASSIGNED')}</strong></div>
@@ -8780,8 +8996,8 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         }}
         navigator.geolocation.watchPosition(sendPing, function () {{}}, {{
           enableHighAccuracy: true,
-          maximumAge: 15000,
-          timeout: 12000
+          maximumAge: 3000,
+          timeout: 3000
         }});
       }})();
     </script>
@@ -9809,12 +10025,13 @@ def handle_driver_location(environ, start_response, connection, user):
         return json_response(start_response, {"ok": False, "error": "Invalid coordinates"}, status="400 Bad Request")
     if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
         return json_response(start_response, {"ok": False, "error": "Coordinates out of range"}, status="400 Bad Request")
+    address_label = reverse_geocode_coordinates(latitude, longitude) or coordinates_query(latitude, longitude)
     connection.execute(
         """
-        INSERT INTO driver_locations (driver_id, ticket_id, latitude, longitude, accuracy, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO driver_locations (driver_id, ticket_id, latitude, longitude, accuracy, address_label, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (user["id"], ticket_id, latitude, longitude, accuracy, now_iso()),
+        (user["id"], ticket_id, latitude, longitude, accuracy, address_label, now_iso()),
     )
     connection.commit()
     return json_response(start_response, {"ok": True})
@@ -9899,6 +10116,8 @@ def handle_update_order(environ, start_response, connection, user):
             update_ticket(connection, ticket_id, status=next_status, picker_id=user["id"], review_reason=None)
             increment_user_stat(connection, user["id"], "total_orders_picked", 1)
             log_activity(connection, user, "PACK_ORDER", f"Packed ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            if next_status == "READY_FOR_DISPATCH":
+                auto_process_dispatch_queue(connection, fallback_dispatcher_id=user["id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Packed and returned to dispatch")
         if action == "send_review" and ticket["status"] == "PACKING":
@@ -9912,6 +10131,11 @@ def handle_update_order(environ, start_response, connection, user):
         return redirect(start_response, "/dashboard?message=That picker action is not allowed")
 
     if user["role"] == "dispatcher":
+        if action == "verify_payment" and ticket["payment_status"] == "PENDING" and ticket["status"] not in {"CANCELED", "DELIVERED"}:
+            update_ticket(connection, ticket_id, payment_status="VERIFIED", dispatcher_id=user["id"], internal_note="Payment verified by dispatch.")
+            log_activity(connection, user, "DISPATCH_VERIFY_PAYMENT", f"Verified payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Payment verified")
         if action == "complete_pickup" and ticket["status"] == "READY_FOR_PICKUP":
             if ticket["payment_status"] != "VERIFIED":
                 return redirect(start_response, "/dashboard?message=Pickup cannot be completed until payment is verified")
@@ -10098,6 +10322,7 @@ def handle_update_order(environ, start_response, connection, user):
             award_loyalty_points_for_ticket(connection, delivered_ticket, user)
             increment_user_stat(connection, user["id"], "total_trips", 1)
             log_activity(connection, user, "DELIVER_ORDER", f"Delivered ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            auto_process_dispatch_queue(connection, fallback_dispatcher_id=user["id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Delivery completed")
         return redirect(start_response, "/dashboard?message=That driver action is not allowed")
@@ -10163,6 +10388,8 @@ def handle_clock_action(environ, start_response, connection, user):
             (user["id"], now_iso(), now_iso()),
         )
         log_activity(connection, user, "CLOCK_IN", "Clocked into the BudHub shift tracker.", target_user_id=user["id"])
+        if user["role"] == "driver":
+            auto_process_dispatch_queue(connection, fallback_dispatcher_id=user["id"])
         connection.commit()
         return redirect(start_response, "/dashboard?message=Clocked in")
     if action == "clock_out":
