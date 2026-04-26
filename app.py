@@ -6092,6 +6092,28 @@ def render_route_summary(ticket, route_stop=None, driver_location=None, customer
     return f"<div class='{tone}'>{''.join(fragments)}</div>"
 
 
+def render_tracking_popup(panel_id, driver_location=None, live_eta_minutes=None, destination_address=""):
+    if not driver_location:
+        return ""
+    map_query = driver_location["address_label"] or coordinates_query(driver_location["latitude"], driver_location["longitude"])
+    map_embed = google_maps_embed_link(map_query)
+    eta_markup = f"<span>ETA: {int(live_eta_minutes)} min</span>" if live_eta_minutes is not None else ""
+    destination_markup = f"<span>Destination: {html.escape(destination_address)}</span>" if destination_address else ""
+    return f"""
+    <div class="ticket-actions">
+      <button type="button" class="button ghost" onclick="var panel=document.getElementById('{html.escape(panel_id)}'); if(panel){{panel.classList.toggle('is-hidden');}}">Track Driver</button>
+    </div>
+    <div class="panel is-hidden" id="{html.escape(panel_id)}">
+      <div class="order-meta">
+        <span>Driver At: {html.escape(driver_location['address_label'] or coordinates_query(driver_location['latitude'], driver_location['longitude']) or 'Unknown')}</span>
+        {eta_markup}
+        {destination_markup}
+      </div>
+      {f"<iframe class='address-embed order-map' src='{html.escape(map_embed)}' loading='lazy'></iframe>" if map_embed else ""}
+    </div>
+    """
+
+
 def render_ticket_review_forms(connection, user, ticket, items):
     if not user or user["role"] != "client" or ticket["status"] != "DELIVERED":
         return ""
@@ -6433,6 +6455,29 @@ def latest_driver_locations_map(connection, ticket_ids):
         tuple(ticket_ids),
     ).fetchall()
     return {row["ticket_id"]: row for row in rows}
+
+
+def next_driver_ticket_id(connection, driver_id):
+    tickets = ticket_rows(
+        connection,
+        "WHERE tickets.driver_id = ? AND tickets.status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')",
+        (driver_id,),
+    )
+    if not tickets:
+        return None
+    active_ticket = next((ticket for ticket in tickets if ticket["status"] == "OUT_FOR_DELIVERY"), None)
+    if active_ticket:
+        return active_ticket["id"]
+    route_stops = ticket_route_stop_map(connection, [ticket["id"] for ticket in tickets])
+    ordered = sorted(
+        tickets,
+        key=lambda ticket: (
+            int(route_stops[ticket["id"]]["stop_sequence"]) if ticket["id"] in route_stops else 9999,
+            ticket["created_at"],
+            ticket["id"],
+        ),
+    )
+    return ordered[0]["id"] if ordered else None
 
 
 def delete_route_plan_for_block(connection, block_id):
@@ -8090,6 +8135,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         route_stop = route_stop_map.get(ticket["id"])
         driver_location = driver_location_map.get(ticket["id"])
         live_eta_minutes = estimate_driver_eta_minutes(connection, ticket, driver_location) if ticket["status"] == "OUT_FOR_DELIVERY" and driver_location else None
+        tracking_panel_id = f"client-track-panel-{ticket['id']}-{index}"
         notes = ""
         if ticket["review_reason"]:
             notes += f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>"
@@ -8136,6 +8182,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         {render_route_summary(ticket, route_stop, driver_location, customer_view=True, live_eta_minutes=live_eta_minutes)}
         {render_payment_instructions(ticket)}
         {f"<div class='tracker-note'>Driver is on the way. Last location update: {html.escape(driver_location['created_at'])}</div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_location else ""}
+        {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_ticket_review_forms(connection, user, ticket, items_map.get(ticket["id"], []))}
@@ -8410,6 +8457,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
         route_stop = ticket_route_stop_map_rows.get(ticket["id"])
         driver_location = driver_location_map.get(ticket["id"])
         live_eta_minutes = estimate_driver_eta_minutes(connection, ticket, driver_location) if ticket["status"] == "OUT_FOR_DELIVERY" and driver_location else None
+        tracking_panel_id = f"dispatch-track-panel-{ticket['id']}-{index}"
         actions = []
         if ticket["status"] == "READY_FOR_PICKUP":
             actions.append(
@@ -8560,6 +8608,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
         {render_route_summary(ticket, route_stop, driver_location, live_eta_minutes=live_eta_minutes)}
+        {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_tracker(ticket["status"])}
@@ -8857,10 +8906,12 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     block_route_map = route_plan_stops_map(connection, list({ticket["delivery_block_id"] for ticket in tickets if ticket["delivery_block_id"]}))
     block_names = sorted({ticket["delivery_block_name"] for ticket in tickets if ticket["delivery_block_name"]})
     active_ticket_number = next((ticket["ticket_number"] for ticket in tickets if ticket["status"] == "OUT_FOR_DELIVERY"), "")
+    next_ticket_id = next_driver_ticket_id(connection, user["id"])
     cards = []
     for index, ticket in enumerate(tickets):
         route_stop = route_stop_map.get(ticket["id"])
         block_stops = block_route_map.get(ticket["delivery_block_id"], []) if ticket["delivery_block_id"] else []
+        can_act_on_ticket = next_ticket_id == ticket["id"]
         button = "Start Route" if ticket["status"] == "DRIVER_ASSIGNED" else "Mark Delivered"
         action = "start_route" if ticket["status"] == "DRIVER_ASSIGNED" else "deliver_order"
         modal_id = f"driver-ticket-{ticket['id']}-{index}"
@@ -8903,11 +8954,12 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
+        {f"<div class='tracker-note warning-note'>Finish the earlier stop before opening this one.</div>" if not can_act_on_ticket and ticket['status'] == 'DRIVER_ASSIGNED' else ""}
         <div class="ticket-actions">
           <form method="post" action="/orders/update" class="action-stack">
             <input type="hidden" name="order_id" value="{ticket["id"]}">
             <input type="hidden" name="action" value="{action}">
-            <button type="submit">{button}</button>
+            <button type="submit" {'disabled' if not can_act_on_ticket else ''}>{button}</button>
           </form>
           {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_verify_payment'><button type='submit'>Verify Cash Payment</button></form>" if ticket['payment_status'] == 'PENDING' and ticket['payment_method'] == 'CASH' and ticket['fulfillment_type'] == 'DELIVERY' else ""}
           {render_driver_emergency_widget(ticket, index)}
@@ -10282,6 +10334,7 @@ def handle_update_order(environ, start_response, connection, user):
     if user["role"] == "driver":
         if ticket["driver_id"] != user["id"]:
             return redirect(start_response, "/dashboard?message=That route is not assigned to you")
+        next_ticket_id = next_driver_ticket_id(connection, user["id"])
         if action == "driver_verify_payment" and ticket["payment_status"] == "PENDING" and ticket["payment_method"] == "CASH" and ticket["fulfillment_type"] == "DELIVERY" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
             update_ticket(connection, ticket_id, payment_status="VERIFIED", driver_id=user["id"], internal_note="Cash delivery payment verified by driver.")
             log_activity(connection, user, "DRIVER_VERIFY_PAYMENT", f"Verified cash delivery payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
@@ -10310,11 +10363,15 @@ def handle_update_order(environ, start_response, connection, user):
             connection.commit()
             return redirect(start_response, f"/dashboard?message=Emergency ticket created with dispatch. {meta['driver_message']}&open_ticket={ticket_id}")
         if action == "start_route" and ticket["status"] == "DRIVER_ASSIGNED":
+            if next_ticket_id != ticket_id:
+                return redirect(start_response, f"/dashboard?message=Complete the earlier route stop before starting ticket {ticket['ticket_number']}")
             update_ticket(connection, ticket_id, status="OUT_FOR_DELIVERY")
             log_activity(connection, user, "START_ROUTE", f"Started route for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Route started")
         if action == "deliver_order" and ticket["status"] == "OUT_FOR_DELIVERY":
+            if next_ticket_id != ticket_id:
+                return redirect(start_response, f"/dashboard?message=Complete the earlier route stop before closing ticket {ticket['ticket_number']}")
             if ticket["payment_status"] != "VERIFIED":
                 return redirect(start_response, f"/dashboard?message=Delivery cannot be completed until the bank verifies payment&open_ticket={ticket_id}")
             update_ticket(connection, ticket_id, status="DELIVERED")
