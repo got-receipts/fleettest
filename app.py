@@ -799,7 +799,7 @@ ROLE_LABELS = {
 
 STATUS_LABELS = {
     "PACKING": "Ready for Packing",
-    "REVIEW_REQUIRED": "Needs Dispatcher Review",
+    "REVIEW_REQUIRED": "Waiting on Customer Update",
     "READY_FOR_DISPATCH": "Ready for Driver Assignment",
     "READY_FOR_PICKUP": "Ready for Pickup",
     "DRIVER_ASSIGNED": "Driver Assigned",
@@ -5996,7 +5996,7 @@ def render_tracker(status):
         blocks.append(f"<div class=\"{' '.join(classes)}\"><span>{index + 1}</span><strong>{html.escape(label)}</strong></div>")
     extra = ""
     if status == "REVIEW_REQUIRED":
-        extra = "<div class='tracker-note warning-note'>Picker sent this order back for dispatcher review.</div>"
+        extra = "<div class='tracker-note warning-note'>One or more items need to be changed before packing can continue. Please choose updated items to send the order back into packing.</div>"
     if status == "DRIVER_ASSIGNED":
         extra = "<div class='tracker-note'>Dispatch assigned a driver. Delivery can only close after payment is verified.</div>"
     if status == "READY_FOR_PICKUP":
@@ -6195,6 +6195,62 @@ def render_ticket_review_forms(connection, user, ticket, items):
     <section class="product-review-panel">
       <div class="panel-head"><div><span class="eyebrow">Verified Reviews</span><h3>Review Delivered Items</h3></div></div>
       <div class="product-review-list">{''.join(forms)}</div>
+    </section>
+    """
+
+
+def render_client_replacement_choices(connection, ticket, items):
+    if ticket["status"] != "REVIEW_REQUIRED":
+        return ""
+    selectors = []
+    for item in items:
+        replacement_options = connection.execute(
+            """
+            SELECT id, name, stock, category
+            FROM products
+            WHERE stock >= ?
+            ORDER BY
+                CASE WHEN id = ? THEN 0 ELSE 1 END,
+                CASE WHEN category = (SELECT category FROM products WHERE id = ?) THEN 0 ELSE 1 END,
+                name COLLATE NOCASE ASC
+            """,
+            (item["quantity"], item["product_id"], item["product_id"]),
+        ).fetchall()
+        if not replacement_options:
+            selectors.append(
+                f"<div class='tracker-note warning-note'>No in-stock replacement is currently available for {html.escape(item['product_name'])}. You can cancel the order or message the team for help.</div>"
+            )
+            continue
+        options = "".join(
+            f"<option value='{product['id']}' {'selected' if product['id'] == item['product_id'] else ''}>{html.escape(product['name'])} ({product['stock']} in stock)</option>"
+            for product in replacement_options
+        )
+        selectors.append(
+            f"""
+            <label>
+              Replace {html.escape(item['product_name'])} x {item['quantity']}
+              <select name="replacement_{item['id']}" required>{options}</select>
+            </label>
+            """
+        )
+    if not selectors:
+        return ""
+    return f"""
+    <section class="panel product-review-panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Product Change Needed</span>
+          <h3>Choose Replacement Items</h3>
+        </div>
+      </div>
+      <div class="tracker-note warning-note">An item in this order is unavailable. Choose updated products below to send the order back into packing.</div>
+      <form method="post" action="/orders/update" class="action-stack product-review-form">
+        <input type="hidden" name="order_id" value="{ticket['id']}">
+        <input type="hidden" name="action" value="client_resolve_review">
+        <div class="reason-box">Picker note: {html.escape(ticket["review_reason"] or "An item needs to be changed before packing can continue.")}</div>
+        {''.join(selectors)}
+        <button type="submit">Confirm Changes and Return to Packing</button>
+      </form>
     </section>
     """
 
@@ -8304,6 +8360,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
+        {render_client_replacement_choices(connection, ticket, items_map.get(ticket["id"], []))}
         {render_ticket_review_forms(connection, user, ticket, items_map.get(ticket["id"], []))}
         {render_tracker(ticket["status"])}
         {notes}
@@ -8648,26 +8705,6 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
                 </form>
                 """
             )
-        if ticket["status"] == "REVIEW_REQUIRED":
-            products = connection.execute("SELECT id, name, stock FROM products ORDER BY name").fetchall()
-            selectors = []
-            for item in items_map.get(ticket["id"], []):
-                options = "".join(
-                    f"<option value='{product['id']}' {'selected' if product['id'] == item['product_id'] else ''}>{html.escape(product['name'])} ({product['stock']} in stock)</option>"
-                    for product in products
-                )
-                selectors.append(f"<label>{html.escape(item['product_name'])} x {item['quantity']}<select name='replacement_{item['id']}'>{options}</select></label>")
-            actions.append(
-                f"""
-                <form method="post" action="/orders/update" class="action-stack">
-                  <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="resolve_review">
-                  <div class="reason-box">Picker review: {html.escape(ticket["review_reason"] or "Needs product change")}</div>
-                  {''.join(selectors)}
-                  <button type="submit">Switch Product and Return to Packing</button>
-                </form>
-                """
-            )
         if ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
             actions.append(
                 f"""
@@ -8812,7 +8849,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
       <div class="stat-card"><span>Open Blocks</span><strong>{sum(1 for block in blocks if block['status'] == 'OPEN')}</strong></div>
       <div class="stat-card"><span>Submitted Blocks</span><strong>{sum(1 for block in blocks if block['status'] == 'SUBMITTED')}</strong></div>
       <div class="stat-card"><span>Planned Routes</span><strong>{sum(1 for block in blocks if block['route_status'] == 'PLANNED')}</strong></div>
-      <div class="stat-card"><span>Needs Review</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'REVIEW_REQUIRED')}</strong></div>
+      <div class="stat-card"><span>Waiting on Customer</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'REVIEW_REQUIRED')}</strong></div>
       <div class="stat-card"><span>Active Tickets</span><strong>{sum(1 for ticket in tickets if ticket['status'] != 'CANCELED')}</strong></div>
       <div class="stat-card"><span>Emergency Alerts</span><strong>{len(emergency_alerts)}</strong></div>
     </section>
@@ -8967,7 +9004,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
                 <input type="hidden" name="order_id" value="{ticket["id"]}">
                 <input type="hidden" name="action" value="send_review">
                 <label>Review Reason<textarea name="reason" required placeholder="Why does this need a product change?"></textarea></label>
-                <button type="submit">Send to Dispatcher Review</button>
+                <button type="submit">Send to Customer for Changes</button>
               </form>
             </div>
             """
@@ -9025,6 +9062,15 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     message_map = order_messages_map(connection, driver_ticket_ids)
     route_stop_map = ticket_route_stop_map(connection, [ticket["id"] for ticket in tickets])
     block_route_map = route_plan_stops_map(connection, list({ticket["delivery_block_id"] for ticket in tickets if ticket["delivery_block_id"]}))
+    tickets = sorted(
+        tickets,
+        key=lambda ticket: (
+            0 if ticket["status"] == "OUT_FOR_DELIVERY" else 1,
+            int(route_stop_map[ticket["id"]]["stop_sequence"]) if ticket["id"] in route_stop_map else 9999,
+            ticket["created_at"],
+            ticket["id"],
+        ),
+    )
     block_names = sorted({ticket["delivery_block_name"] for ticket in tickets if ticket["delivery_block_name"]})
     active_ticket_number = next((ticket["ticket_number"] for ticket in tickets if ticket["status"] == "OUT_FOR_DELIVERY"), "")
     next_ticket_id = next_driver_ticket_id(connection, user["id"])
@@ -10275,6 +10321,39 @@ def handle_update_order(environ, start_response, connection, user):
     if user["role"] == "client":
         if ticket["client_id"] != user["id"]:
             return redirect(start_response, "/dashboard?message=That order is not yours")
+        if action == "client_resolve_review" and ticket["status"] == "REVIEW_REQUIRED":
+            items = ticket_items_map(connection, [ticket_id]).get(ticket_id, [])
+            for item in items:
+                replacement_id = int(data.get(f"replacement_{item['id']}", str(item["product_id"])) or item["product_id"])
+                replacement = connection.execute("SELECT * FROM products WHERE id = ?", (replacement_id,)).fetchone()
+                if not replacement or replacement["stock"] < item["quantity"]:
+                    return redirect(start_response, "/dashboard?message=One of the replacement items is no longer in stock")
+            for item in items:
+                replacement_id = int(data.get(f"replacement_{item['id']}", str(item["product_id"])) or item["product_id"])
+                replacement = connection.execute("SELECT * FROM products WHERE id = ?", (replacement_id,)).fetchone()
+                connection.execute(
+                    "UPDATE ticket_items SET product_id = ?, locked_price = ? WHERE id = ?",
+                    (replacement["id"], replacement["price"], item["id"]),
+                )
+            try:
+                reserve_ticket_stock(connection, ticket_id)
+            except ValueError as exc:
+                return redirect(start_response, f"/dashboard?message={str(exc)}")
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(
+                connection,
+                ticket_id,
+                status="PACKING",
+                review_reason=None,
+                picker_id=None,
+                driver_id=None,
+                delivery_block_id=None,
+                internal_note="Customer approved replacement items after stock issue.",
+            )
+            refresh_delivery_block_status(connection, prior_block_id)
+            log_activity(connection, user, "CLIENT_RESOLVE_REVIEW", f"Updated replacement items for ticket #{ticket['ticket_number']} after a stock issue.")
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Updated items saved and sent back to packing")
         if action == "client_cancel":
             if ticket["status"] in {"DELIVERED", "CANCELED", "OUT_FOR_DELIVERY"}:
                 return redirect(start_response, "/dashboard?message=This order can no longer be canceled online")
@@ -10312,7 +10391,7 @@ def handle_update_order(environ, start_response, connection, user):
             release_ticket_stock(connection, ticket_id)
             update_ticket(connection, ticket_id, status="REVIEW_REQUIRED", picker_id=user["id"], review_reason=reason, driver_id=None)
             connection.commit()
-            return redirect(start_response, "/dashboard?message=Ticket sent to dispatcher review")
+            return redirect(start_response, "/dashboard?message=Ticket returned to the customer for item changes")
         return redirect(start_response, "/dashboard?message=That picker action is not allowed")
 
     if user["role"] == "dispatcher":
@@ -10442,26 +10521,6 @@ def handle_update_order(environ, start_response, connection, user):
             refresh_delivery_block_status(connection, prior_block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket canceled")
-        if action == "resolve_review" and ticket["status"] == "REVIEW_REQUIRED":
-            items = ticket_items_map(connection, [ticket_id]).get(ticket_id, [])
-            for item in items:
-                replacement_id = int(data.get(f"replacement_{item['id']}", str(item["product_id"])) or item["product_id"])
-                replacement = connection.execute("SELECT * FROM products WHERE id = ?", (replacement_id,)).fetchone()
-                if not replacement or replacement["stock"] < item["quantity"]:
-                    return redirect(start_response, "/dashboard?message=A replacement item does not have enough stock")
-            for item in items:
-                replacement_id = int(data.get(f"replacement_{item['id']}", str(item["product_id"])) or item["product_id"])
-                replacement = connection.execute("SELECT * FROM products WHERE id = ?", (replacement_id,)).fetchone()
-                connection.execute("UPDATE ticket_items SET product_id = ?, locked_price = ? WHERE id = ?", (replacement["id"], replacement["price"], item["id"]))
-            try:
-                reserve_ticket_stock(connection, ticket_id)
-            except ValueError as exc:
-                return redirect(start_response, f"/dashboard?message={str(exc)}")
-            prior_block_id = ticket["delivery_block_id"]
-            update_ticket(connection, ticket_id, status="PACKING", dispatcher_id=user["id"], review_reason=None, picker_id=None, driver_id=None, delivery_block_id=None, internal_note="Dispatcher updated products after review.")
-            refresh_delivery_block_status(connection, prior_block_id)
-            connection.commit()
-            return redirect(start_response, "/dashboard?message=Ticket updated and returned to packing")
         return redirect(start_response, "/dashboard?message=That dispatch action is not allowed")
 
     if user["role"] == "driver":
