@@ -75,6 +75,39 @@ ROUTE_DEBUG_TOOLS = os.environ.get("BUDHUB_ROUTE_DEBUG", "").strip().lower() in 
 DRIVER_RETURN_BUFFER_MINUTES = int(os.environ.get("BUDHUB_DRIVER_RETURN_BUFFER_MINUTES", "10") or "10")
 LOYALTY_POINTS_PER_DOLLAR = 1
 LOYALTY_POINTS_PER_DISCOUNT_DOLLAR = 20
+DELIVERY_ZONE_LABELS = {
+    "ZONE_1": "Zone 1 - Albany / East Corridor",
+    "ZONE_2": "Zone 2 - Troy / North Corridor",
+    "OUT_OF_COVERAGE": "Out of Coverage",
+    "UNKNOWN": "Unknown Zone",
+}
+DELIVERY_ZONE_RULES = {
+    "ZONE_1": [
+        "albany",
+        "rensselaer",
+        "colonie",
+        "east greenbush",
+        "north greenbush",
+        "wynantskill",
+        "menands",
+    ],
+    "ZONE_2": [
+        "troy",
+        "cohoes",
+        "watervliet",
+        "latham",
+        "brunswick",
+        "clifton park",
+        "halfmoon",
+        "mechanicville",
+    ],
+    "OUT_OF_COVERAGE": [
+        "schodack",
+        "nassau",
+        "pittstown",
+        "schaghticoke",
+    ],
+}
 DEFAULT_PAYMENT_DESTINATIONS = [
     ("VENMO", "Venmo", "Rudolph Bowen", "https://venmo.com/u/Rudolph-Bowen", 1, 1),
     ("VENMO", "Venmo", "Jesenia Fields", "https://venmo.com/u/Jesenia-Fields", 2, 1),
@@ -170,6 +203,7 @@ POSTGRES_CREATE_STATEMENTS = [
         block_name TEXT UNIQUE NOT NULL,
         dispatcher_id INTEGER NOT NULL,
         driver_id INTEGER,
+        delivery_zone TEXT DEFAULT '',
         status TEXT NOT NULL DEFAULT 'OPEN',
         route_provider TEXT NOT NULL DEFAULT 'BUDHUB_NATIVE',
         route_status TEXT NOT NULL DEFAULT 'UNPLANNED',
@@ -191,6 +225,8 @@ POSTGRES_CREATE_STATEMENTS = [
         contact_name TEXT,
         contact_phone TEXT,
         shipping_address TEXT NOT NULL,
+        delivery_zone TEXT DEFAULT '',
+        resolved_city TEXT DEFAULT '',
         customer_note TEXT,
         status TEXT NOT NULL,
         payment_status TEXT NOT NULL,
@@ -2673,6 +2709,8 @@ def init_db():
                 contact_name TEXT,
                 contact_phone TEXT,
                 shipping_address TEXT NOT NULL,
+                delivery_zone TEXT NOT NULL DEFAULT '',
+                resolved_city TEXT NOT NULL DEFAULT '',
                 customer_note TEXT,
                 status TEXT NOT NULL,
                 payment_status TEXT NOT NULL,
@@ -2706,6 +2744,7 @@ def init_db():
                 block_name TEXT NOT NULL UNIQUE,
                 dispatcher_id INTEGER NOT NULL,
                 driver_id INTEGER,
+                delivery_zone TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'OPEN',
                 route_provider TEXT NOT NULL DEFAULT 'BUDHUB_NATIVE',
                 route_status TEXT NOT NULL DEFAULT 'UNPLANNED',
@@ -2964,6 +3003,8 @@ def init_db():
         ensure_column(connection, "tickets", "payment_method TEXT NOT NULL DEFAULT 'CHIME'")
         ensure_column(connection, "tickets", "contact_name TEXT")
         ensure_column(connection, "tickets", "contact_phone TEXT")
+        ensure_column(connection, "tickets", "delivery_zone TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "tickets", "resolved_city TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "tickets", "coupon_code TEXT")
         ensure_column(connection, "tickets", "discount_amount REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "loyalty_discount_amount REAL NOT NULL DEFAULT 0")
@@ -2972,6 +3013,7 @@ def init_db():
         ensure_column(connection, "tickets", "loyalty_points_awarded INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "delivery_block_id INTEGER")
         ensure_column(connection, "delivery_blocks", "route_provider TEXT NOT NULL DEFAULT 'BUDHUB_NATIVE'")
+        ensure_column(connection, "delivery_blocks", "delivery_zone TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "delivery_blocks", "route_status TEXT NOT NULL DEFAULT 'UNPLANNED'")
         ensure_column(connection, "delivery_blocks", "planned_distance_miles REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "delivery_blocks", "planned_duration_minutes INTEGER NOT NULL DEFAULT 0")
@@ -6308,14 +6350,14 @@ def render_ticket_modal_script(open_ticket_id=None):
     """.replace("__OPEN_TICKET_ID__", auto_open)
 
 
-def create_delivery_block(connection, dispatcher_id):
+def create_delivery_block(connection, dispatcher_id, delivery_zone=""):
     block_name = generate_block_name(connection)
     cursor = connection.execute(
         """
-        INSERT INTO delivery_blocks (block_name, dispatcher_id, status, created_at, updated_at)
-        VALUES (?, ?, 'OPEN', ?, ?)
+        INSERT INTO delivery_blocks (block_name, dispatcher_id, delivery_zone, status, created_at, updated_at)
+        VALUES (?, ?, ?, 'OPEN', ?, ?)
         """,
-        (block_name, dispatcher_id, now_iso(), now_iso()),
+        (block_name, dispatcher_id, delivery_zone or "", now_iso(), now_iso()),
     )
     return cursor.lastrowid
 
@@ -6372,6 +6414,10 @@ def normalize_route_provider(value):
 
 def route_provider_label(value):
     return ROUTE_PROVIDER_LABELS.get(normalize_route_provider(value), ROUTE_PROVIDER_LABELS["BUDHUB_NATIVE"])
+
+
+def delivery_zone_label(value):
+    return DELIVERY_ZONE_LABELS.get((value or "").strip().upper(), "Unknown Zone")
 
 
 class RoutePlanningError(Exception):
@@ -6670,6 +6716,58 @@ def reverse_geocode_coordinates(latitude, longitude):
         or properties.get("street")
         or ""
     ).strip()
+
+
+def reverse_geocode_locality(latitude, longitude):
+    if not OPENROUTESERVICE_REVERSE_GEOCODE_URL or not OPENROUTESERVICE_API_KEY:
+        return ""
+    query = urlencode(
+        {
+            "api_key": OPENROUTESERVICE_API_KEY,
+            "point.lon": f"{float(longitude):.6f}",
+            "point.lat": f"{float(latitude):.6f}",
+            "size": 1,
+        }
+    )
+    payload = routing_json_request(f"{OPENROUTESERVICE_REVERSE_GEOCODE_URL}?{query}", payload=None, method="GET")
+    features = payload.get("features") or []
+    if not features:
+        return ""
+    properties = features[0].get("properties") or {}
+    locality = (
+        properties.get("locality")
+        or properties.get("city")
+        or properties.get("municipality")
+        or properties.get("county")
+        or ""
+    )
+    return str(locality).strip()
+
+
+def zone_from_text(text):
+    normalized = f" {str(text or '').strip().lower()} "
+    if not normalized.strip():
+        return "", ""
+    for zone_name in ("OUT_OF_COVERAGE", "ZONE_1", "ZONE_2"):
+        for keyword in DELIVERY_ZONE_RULES[zone_name]:
+            if f" {keyword.lower()} " in normalized or keyword.lower() in normalized:
+                return zone_name, keyword.title()
+    return "", ""
+
+
+def resolve_delivery_zone(connection, shipping_address):
+    zone_name, matched_city = zone_from_text(shipping_address)
+    if zone_name:
+        return {"zone": zone_name, "city": matched_city}
+    try:
+        coordinates = resolve_address_coordinates(connection, shipping_address)
+        locality = reverse_geocode_locality(coordinates["latitude"], coordinates["longitude"])
+    except RoutePlanningError:
+        locality = ""
+    zone_name, matched_city = zone_from_text(locality)
+    if zone_name:
+        return {"zone": zone_name, "city": matched_city or locality}
+    return {"zone": "UNKNOWN", "city": locality}
 
 
 def resolve_address_coordinates(connection, address_text):
@@ -7051,10 +7149,12 @@ def submit_block_to_driver(connection, block_id, driver_id, dispatcher_id, autom
     if not block or block["status"] != "OPEN" or not driver:
         return False
     block_tickets = connection.execute(
-        "SELECT id FROM tickets WHERE delivery_block_id = ? AND status = 'READY_FOR_DISPATCH' ORDER BY created_at ASC, id ASC",
+        "SELECT id, delivery_zone FROM tickets WHERE delivery_block_id = ? AND status = 'READY_FOR_DISPATCH' ORDER BY created_at ASC, id ASC",
         (block_id,),
     ).fetchall()
     if len(block_tickets) != BLOCK_SIZE:
+        return False
+    if any((row["delivery_zone"] or "") != (block["delivery_zone"] or "") for row in block_tickets):
         return False
     upsert_route_plan_for_block(connection, block_id, block["route_provider"])
     connection.execute(
@@ -7092,9 +7192,18 @@ def auto_process_dispatch_queue(connection, fallback_dispatcher_id=None):
     for ticket in ready_tickets:
         if ticket["delivery_block_id"]:
             continue
-        target_block = next((block for block in open_blocks if int(block["active_ticket_count"] or 0) < BLOCK_SIZE), None)
+        if ticket["delivery_zone"] in {"", "UNKNOWN", "OUT_OF_COVERAGE"}:
+            continue
+        target_block = next(
+            (
+                block
+                for block in open_blocks
+                if int(block["active_ticket_count"] or 0) < BLOCK_SIZE and (block["delivery_zone"] or "") == (ticket["delivery_zone"] or "")
+            ),
+            None,
+        )
         if not target_block:
-            block_id = create_delivery_block(connection, dispatcher_id)
+            block_id = create_delivery_block(connection, dispatcher_id, ticket["delivery_zone"])
             target_block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
             open_blocks.append(target_block)
         update_ticket(
@@ -7159,6 +7268,13 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
     ticket_number = generate_ticket_number(connection)
     timestamp = now_iso()
     client = connection.execute("SELECT * FROM users WHERE id = ?", (client_id,)).fetchone()
+    zone_info = {"zone": "", "city": ""}
+    if fulfillment_type == "DELIVERY":
+        zone_info = resolve_delivery_zone(connection, shipping_address)
+        if zone_info["zone"] == "OUT_OF_COVERAGE":
+            raise ValueError("This delivery address is outside our coverage zones.")
+        if zone_info["zone"] == "UNKNOWN":
+            raise ValueError("We could not match this delivery address to a delivery zone.")
     preview_items = []
     subtotal = 0.0
     for item in items:
@@ -7211,9 +7327,9 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
     connection.execute(
         """
         INSERT INTO tickets (
-            ticket_number, client_id, fulfillment_type, payment_method, contact_name, contact_phone, shipping_address, customer_note, status, payment_status,
+            ticket_number, client_id, fulfillment_type, payment_method, contact_name, contact_phone, shipping_address, delivery_zone, resolved_city, customer_note, status, payment_status,
             coupon_code, discount_amount, loyalty_discount_amount, credit_applied, loyalty_points_used, loyalty_points_awarded, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticket_number,
@@ -7223,6 +7339,8 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
             contact_name,
             contact_phone,
             shipping_address,
+            zone_info["zone"],
+            zone_info["city"],
             customer_note,
             payment_status,
             coupon_code or None,
@@ -8155,6 +8273,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Driver: {html.escape(ticket["driver_name"] or 'Pending dispatch')}</span>
+          <span>Zone: {html.escape(delivery_zone_label(ticket["delivery_zone"]))}</span>
         </div>
         """
         maps_link = google_maps_link(ticket["shipping_address"])
@@ -8606,6 +8725,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
+          <span>Zone: {html.escape(delivery_zone_label(ticket["delivery_zone"]))}</span>
         </div>
         {render_route_summary(ticket, route_stop, driver_location, live_eta_minutes=live_eta_minutes)}
         {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
@@ -8666,6 +8786,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
                 <span>Status: {html.escape(block["status"].title())}</span>
                 <span>Driver: {html.escape(block["driver_name"] or 'Unassigned')}</span>
                 <span>Dispatcher: {html.escape(block["dispatcher_name"] or 'Dispatch')}</span>
+                <span>Zone: {html.escape(delivery_zone_label(block["delivery_zone"]))}</span>
                 <span>Route Engine: {html.escape(route_provider_label(route_provider))}</span>
                 <span>Route Status: {html.escape((block["route_status"] or 'UNPLANNED').replace('_', ' ').title())}</span>
                 <span>Planned Miles: {float(block["planned_distance_miles"] or 0):.1f}</span>
@@ -9966,6 +10087,12 @@ def handle_create_order(environ, start_response, connection, user):
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "Delivery address is required for delivery orders."))
     if fulfillment_type == "PICKUP" and not shipping_address:
         shipping_address = "In-store pickup"
+    if fulfillment_type == "DELIVERY":
+        zone_info = resolve_delivery_zone(connection, shipping_address)
+        if zone_info["zone"] == "OUT_OF_COVERAGE":
+            return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "This address is outside our delivery coverage area."))
+        if zone_info["zone"] == "UNKNOWN":
+            return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "We could not match this address to one of our delivery zones."))
     try:
         ticket_id = create_ticket(
             connection,
@@ -10014,6 +10141,12 @@ def handle_cart_checkout(environ, start_response, connection, user):
         return redirect_with_message(start_response, return_to, "Delivery address is required")
     if fulfillment_type == "PICKUP" and not shipping_address:
         shipping_address = "In-store pickup"
+    if fulfillment_type == "DELIVERY":
+        zone_info = resolve_delivery_zone(connection, shipping_address)
+        if zone_info["zone"] == "OUT_OF_COVERAGE":
+            return redirect_with_message(start_response, return_to, "This address is outside our delivery coverage area.")
+        if zone_info["zone"] == "UNKNOWN":
+            return redirect_with_message(start_response, return_to, "We could not match this address to one of our delivery zones.")
     try:
         ticket_id = create_ticket(
             connection,
