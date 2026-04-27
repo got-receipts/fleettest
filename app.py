@@ -6286,23 +6286,25 @@ def render_order_chat(ticket, user, message_rows):
         return ""
     widget_id = f"order-chat-widget-{ticket['id']}"
     chat_locked = ticket["status"] == "DELIVERED"
+    message_count = len(message_rows)
     message_items = "".join(
         f"<div class='chat-message'><strong>{html.escape(row['author_name'])}</strong><span class='eyebrow'>{html.escape(ROLE_LABELS.get(row['author_role'], row['author_role']))}</span><p>{html.escape(row['message'])}</p><small>{html.escape(row['created_at'])}</small></div>"
         for row in message_rows
     ) or "<p>No order chat yet.</p>"
     return f"""
-    <section class="panel order-chat-panel">
-        <div class="panel-head">
-          <div>
-            <span class="eyebrow">Order Chat</span>
-            <h3>Ticket Messages</h3>
-          </div>
-        <button type="button" class="button ghost chat-launch{' is-disabled' if chat_locked else ''}" data-open-order-chat="{widget_id}" {'disabled' if chat_locked else ''}>{'Messaging Closed' if chat_locked else 'Message'}</button>
-      </div>
+    <section class="ticket-chat-launcher">
+      <button type="button" class="button ghost ticket-chat-button{' is-disabled' if chat_locked else ''}" data-open-order-chat="{widget_id}" {'disabled' if chat_locked else ''} aria-label="Open ticket messages">
+        <span class="ticket-chat-icon" aria-hidden="true">&#9993;</span>
+        <span class="ticket-chat-copy">
+          <strong>{'Messaging Closed' if chat_locked else 'Messages'}</strong>
+          <small>{'Completed orders can no longer be messaged.' if chat_locked else 'Open the ticket chat in a popout window.'}</small>
+        </span>
+        <span class="ticket-chat-badge">{message_count}</span>
+      </button>
     </section>
     <div class="modal-shell is-hidden" id="{widget_id}">
       <div class="modal-backdrop" data-close-order-chat="{widget_id}"></div>
-      <div class="modal-card">
+      <div class="modal-card order-chat-modal">
         <div class="panel-head">
           <div>
             <span class="eyebrow">Order Chat</span>
@@ -6311,7 +6313,7 @@ def render_order_chat(ticket, user, message_rows):
           <button type="button" class="button ghost modal-close" data-close-order-chat="{widget_id}">Close</button>
         </div>
         <div class="chat-thread">{message_items}</div>
-        {"<div class='tracker-note'>Messaging is closed for completed tickets.</div>" if chat_locked else f"<form method='post' action='/orders/chat' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><label>Message<textarea name='message' required placeholder='Send a note about this order'></textarea></label><button type='submit'>Send Message</button></form>"}
+        {"<div class='tracker-note'>Messaging is closed for completed tickets.</div>" if chat_locked else f"<form method='post' action='/orders/chat' class='action-stack order-chat-form'><input type='hidden' name='order_id' value='{ticket['id']}'><label>Message<textarea name='message' required placeholder='Send a note about this order'></textarea></label><button type='submit'>Send Message</button></form>"}
       </div>
     </div>
     """
