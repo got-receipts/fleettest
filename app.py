@@ -3090,29 +3090,29 @@ def init_db():
 
 def seed_defaults(connection):
     users = [
-        ("Budhub Helpdesk", "helpdesk@ecommerce.local", "helpdesk123", "helpdesk"),
-        ("System Admin", "admin@ecommerce.local", "admin123", "admin"),
-        ("Budhub Bank", "bank@ecommerce.local", "bank123", "banker"),
-        ("Dispatch Lead", "dispatcher@ecommerce.local", "dispatch123", "dispatcher"),
-        ("Warehouse Picker", "picker@ecommerce.local", "picker123", "picker"),
-        ("Delivery Driver", "driver@ecommerce.local", "driver123", "driver"),
-        ("Demo Customer", "client@ecommerce.local", "client123", "client"),
+        ("Budhub Helpdesk", "helpdesk@ecommerce.local", "helpdesk123", "helpdesk", ""),
+        ("System Admin", "admin@ecommerce.local", "admin123", "admin", ""),
+        ("Budhub Bank", "bank@ecommerce.local", "bank123", "banker", ""),
+        ("Dispatch Lead", "dispatcher@ecommerce.local", "dispatch123", "dispatcher", ""),
+        ("Warehouse Picker", "picker@ecommerce.local", "picker123", "picker", ""),
+        ("Delivery Driver", "driver@ecommerce.local", "driver123", "driver", "+15183760338"),
+        ("Demo Customer", "client@ecommerce.local", "client123", "client", ""),
     ]
-    for name, email, password, role in users:
+    for name, email, password, role, phone in users:
         existing = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
         if existing:
             connection.execute(
-                "UPDATE users SET verification_status = 'VERIFIED', account_state = CASE WHEN account_state = 'PENDING_VERIFICATION' THEN 'ACTIVE' ELSE account_state END WHERE id = ?",
-                (existing["id"],),
+                "UPDATE users SET verification_status = 'VERIFIED', account_state = CASE WHEN account_state = 'PENDING_VERIFICATION' THEN 'ACTIVE' ELSE account_state END, phone = CASE WHEN COALESCE(phone, '') = '' AND ? != '' THEN ? ELSE phone END WHERE id = ?",
+                (phone, phone, existing["id"]),
             )
             continue
         connection.execute(
             """
             INSERT INTO users (
-                name, email, password_hash, role, account_state, verification_status, verified_at, created_at
-            ) VALUES (?, ?, ?, ?, 'ACTIVE', 'VERIFIED', ?, ?)
+                name, email, password_hash, role, phone, account_state, verification_status, verified_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', 'VERIFIED', ?, ?)
             """,
-            (name, email, hash_password(password), role, now_iso(), now_iso()),
+            (name, email, hash_password(password), role, phone, now_iso(), now_iso()),
         )
 
     sync_launch_menu(connection)
