@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import sqlite3
+import base64
 from collections import deque
 from datetime import datetime, timedelta
 from http import cookies
@@ -23,6 +24,30 @@ try:
 except ImportError:
     psycopg2 = None
     psycopg2_extras = None
+
+
+def load_local_env_file():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
+                    value = value[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        return
+
+
+load_local_env_file()
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +98,12 @@ ROUTE_PROFILE = os.environ.get("BUDHUB_ROUTE_PROFILE", "driving-car").strip() or
 ROUTE_HTTP_TIMEOUT = int(os.environ.get("BUDHUB_ROUTE_TIMEOUT_SECONDS", "12") or "12")
 ROUTE_DEBUG_TOOLS = os.environ.get("BUDHUB_ROUTE_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 DRIVER_RETURN_BUFFER_MINUTES = int(os.environ.get("BUDHUB_DRIVER_RETURN_BUFFER_MINUTES", "10") or "10")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_API_KEY_SID = os.environ.get("TWILIO_API_KEY_SID", "").strip()
+TWILIO_API_KEY_SECRET = os.environ.get("TWILIO_API_KEY_SECRET", "").strip()
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "").strip()
+BUDHUB_PUBLIC_BASE_URL = (os.environ.get("BUDHUB_PUBLIC_BASE_URL", "").strip() or "").rstrip("/")
 LOYALTY_POINTS_PER_DOLLAR = 1
 LOYALTY_POINTS_PER_DISCOUNT_DOLLAR = 20
 DELIVERY_ZONE_LABELS = {
@@ -2430,6 +2461,12 @@ def read_post_data(environ):
     return {key: value[0].strip() for key, value in parsed.items()}
 
 
+def xml_response(start_response, body, status="200 OK"):
+    payload = body.encode("utf-8")
+    start_response(status, [("Content-Type", "text/xml; charset=utf-8"), ("Content-Length", str(len(payload)))])
+    return [payload]
+
+
 def read_json_data(environ):
     try:
         size = int(environ.get("CONTENT_LENGTH") or "0")
@@ -2960,6 +2997,24 @@ def init_db():
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS masked_call_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_token TEXT NOT NULL UNIQUE,
+                ticket_id INTEGER NOT NULL,
+                driver_id INTEGER NOT NULL,
+                client_id INTEGER NOT NULL,
+                driver_phone TEXT NOT NULL,
+                client_phone TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                twilio_call_sid TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
+                FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (client_id) REFERENCES users(id) ON DELETE CASCADE
             );
             """
         )
@@ -4692,6 +4747,105 @@ def log_activity(connection, actor, action, details="", target_user_id=None):
         ),
     )
     append_server_log("activity", "info", action, details, user=actor)
+
+
+def twilio_configured():
+    has_secret = bool(TWILIO_AUTH_TOKEN) or bool(TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET)
+    return bool(TWILIO_ACCOUNT_SID and has_secret and TWILIO_PHONE_NUMBER)
+
+
+def twilio_auth_header():
+    credential_sid = TWILIO_API_KEY_SID or TWILIO_ACCOUNT_SID
+    credential_secret = TWILIO_API_KEY_SECRET or TWILIO_AUTH_TOKEN
+    token = base64.b64encode(f"{credential_sid}:{credential_secret}".encode("utf-8")).decode("ascii")
+    return "Basic " + token
+
+
+def normalize_phone_number(value):
+    digits = re.sub(r"\D", "", value or "")
+    if not digits:
+        return ""
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if value and str(value).strip().startswith("+"):
+        return "+" + digits
+    return f"+{digits}"
+
+
+def public_base_url(environ):
+    if BUDHUB_PUBLIC_BASE_URL:
+        return BUDHUB_PUBLIC_BASE_URL
+    scheme = environ.get("HTTP_X_FORWARDED_PROTO") or environ.get("wsgi.url_scheme") or "https"
+    host = environ.get("HTTP_X_FORWARDED_HOST") or environ.get("HTTP_HOST") or environ.get("SERVER_NAME") or ""
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def create_masked_call_session(connection, ticket, driver):
+    driver_phone = normalize_phone_number(driver["phone"] or "")
+    client_phone = normalize_phone_number(ticket["contact_phone"] or "")
+    if not driver_phone:
+        raise ValueError("Driver phone number is missing from the account profile")
+    if not client_phone:
+        raise ValueError("Client phone number is missing on this ticket")
+    existing = connection.execute(
+        """
+        SELECT * FROM masked_call_sessions
+        WHERE ticket_id = ? AND driver_id = ? AND status IN ('PENDING', 'CALLING', 'IN_PROGRESS')
+          AND expires_at > ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (ticket["id"], driver["id"], now_iso()),
+    ).fetchone()
+    if existing:
+        return existing
+    token = secrets.token_urlsafe(24)
+    created_at = now_iso()
+    expires_at = (datetime.utcnow() + timedelta(minutes=45)).isoformat()
+    connection.execute(
+        """
+        INSERT INTO masked_call_sessions (
+            session_token, ticket_id, driver_id, client_id, driver_phone, client_phone,
+            status, twilio_call_sid, created_at, expires_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', '', ?, ?, ?)
+        """,
+        (token, ticket["id"], driver["id"], ticket["client_id"], driver_phone, client_phone, created_at, expires_at, created_at),
+    )
+    return connection.execute("SELECT * FROM masked_call_sessions WHERE session_token = ?", (token,)).fetchone()
+
+
+def start_twilio_driver_call(environ, connection, session):
+    if not twilio_configured():
+        raise ValueError("Twilio calling is not configured")
+    callback_url = f"{public_base_url(environ)}/twilio/voice/driver-bridge?session={quote(session['session_token'])}"
+    payload = urlencode(
+        {
+            "To": session["driver_phone"],
+            "From": normalize_phone_number(TWILIO_PHONE_NUMBER),
+            "Url": callback_url,
+            "StatusCallback": f"{public_base_url(environ)}/twilio/voice/status?session={quote(session['session_token'])}",
+            "StatusCallbackMethod": "POST",
+            "StatusCallbackEvent": "initiated ringing answered completed",
+        }
+    ).encode("utf-8")
+    request = Request(
+        f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": twilio_auth_header(),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    with urlopen(request, timeout=20) as response:
+        response_payload = json.loads(response.read().decode("utf-8"))
+    connection.execute(
+        "UPDATE masked_call_sessions SET status = 'CALLING', twilio_call_sid = ?, updated_at = ? WHERE id = ?",
+        (response_payload.get("sid", ""), now_iso(), session["id"]),
+    )
+    return response_payload
 
 
 def coupon_rows(connection, where_clause="", params=()):
@@ -9108,7 +9262,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
-          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
+          <span>Phone: Masked for privacy</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
@@ -9130,6 +9284,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
             <input type="hidden" name="action" value="{action}">
             <button type="submit" {'disabled' if not can_act_on_ticket else ''}>{button}</button>
           </form>
+          {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_call_client'><button type='submit'>Call Client</button></form>" if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
           {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_verify_payment'><button type='submit'>Verify Cash Payment</button></form>" if ticket['payment_status'] == 'PENDING' and ticket['payment_method'] == 'CASH' and ticket['fulfillment_type'] == 'DELIVERY' else ""}
           {render_driver_emergency_widget(ticket, index)}
         </div>
@@ -9157,7 +9312,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
-          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
+          <span>Phone: Masked for privacy</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Direct assignment')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
@@ -10270,6 +10425,58 @@ def handle_driver_location(environ, start_response, connection, user):
     return json_response(start_response, {"ok": True})
 
 
+def handle_twilio_driver_bridge(environ, start_response, connection):
+    params = query_params(environ)
+    session_token = (params.get("session", "") or "").strip()
+    session = connection.execute("SELECT * FROM masked_call_sessions WHERE session_token = ?", (session_token,)).fetchone()
+    if not session or session["expires_at"] <= now_iso():
+        return xml_response(start_response, "<Response><Say>The BudHub call session is no longer available.</Say><Hangup/></Response>")
+    connection.execute(
+        "UPDATE masked_call_sessions SET status = 'IN_PROGRESS', updated_at = ? WHERE id = ?",
+        (now_iso(), session["id"]),
+    )
+    connection.commit()
+    return xml_response(
+        start_response,
+        f"<Response><Say>Connecting you to your customer now.</Say><Dial callerId=\"{html.escape(normalize_phone_number(TWILIO_PHONE_NUMBER))}\">{html.escape(session['client_phone'])}</Dial></Response>",
+    )
+
+
+def handle_twilio_incoming_call(environ, start_response, connection):
+    data = read_post_data(environ)
+    caller_number = normalize_phone_number(data.get("From", "") or query_params(environ).get("From", ""))
+    if not caller_number:
+        return xml_response(start_response, "<Response><Say>We could not identify this caller. Please contact BudHub support through the app.</Say><Hangup/></Response>")
+    tickets = ticket_rows(connection, "WHERE tickets.status = 'OUT_FOR_DELIVERY' AND tickets.fulfillment_type = 'DELIVERY'", ())
+    matched_ticket = next((ticket for ticket in tickets if normalize_phone_number(ticket["contact_phone"] or "") == caller_number), None)
+    if not matched_ticket or not matched_ticket["driver_id"]:
+        return xml_response(start_response, "<Response><Say>We could not find an active delivery for this phone number right now. Please message BudHub through the app.</Say><Hangup/></Response>")
+    driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (matched_ticket["driver_id"],)).fetchone()
+    driver_phone = normalize_phone_number(driver["phone"] if driver else "")
+    if not driver_phone:
+        return xml_response(start_response, "<Response><Say>The assigned driver is unavailable by phone right now. Please message BudHub through the app.</Say><Hangup/></Response>")
+    return xml_response(
+        start_response,
+        f"<Response><Say>Connecting you to your BudHub driver now.</Say><Dial callerId=\"{html.escape(normalize_phone_number(TWILIO_PHONE_NUMBER))}\">{html.escape(driver_phone)}</Dial></Response>",
+    )
+
+
+def handle_twilio_call_status(environ, start_response, connection):
+    params = query_params(environ)
+    data = read_post_data(environ)
+    session_token = (params.get("session", "") or "").strip()
+    session = connection.execute("SELECT * FROM masked_call_sessions WHERE session_token = ?", (session_token,)).fetchone()
+    if session:
+        status_value = (data.get("CallStatus", "") or "COMPLETED").strip().upper()
+        normalized_status = "COMPLETED" if status_value in {"COMPLETED", "CANCELED", "BUSY", "FAILED", "NO_ANSWER"} else "IN_PROGRESS"
+        connection.execute(
+            "UPDATE masked_call_sessions SET status = ?, updated_at = ? WHERE id = ?",
+            (normalized_status, now_iso(), session["id"]),
+        )
+        connection.commit()
+    return xml_response(start_response, "<Response></Response>")
+
+
 def handle_update_order(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"banker", "dispatcher", "picker", "driver", "client"})
     if gate:
@@ -10529,6 +10736,23 @@ def handle_update_order(environ, start_response, connection, user):
         if ticket["driver_id"] != user["id"]:
             return redirect(start_response, "/dashboard?message=That route is not assigned to you")
         next_ticket_id = next_driver_ticket_id(connection, user["id"])
+        if action == "driver_call_client":
+            if ticket["status"] != "OUT_FOR_DELIVERY":
+                return redirect(start_response, "/dashboard?message=Driver calling is only available after the ticket is out for delivery")
+            if not twilio_configured():
+                return redirect(start_response, "/dashboard?message=Twilio calling is not configured yet")
+            try:
+                session = create_masked_call_session(connection, ticket, user)
+                start_twilio_driver_call(environ, connection, session)
+            except ValueError as exc:
+                return redirect(start_response, f"/dashboard?message={str(exc)}")
+            except HTTPError as exc:
+                return redirect(start_response, f"/dashboard?message=Twilio rejected the call request ({exc.code})")
+            except URLError:
+                return redirect(start_response, "/dashboard?message=Twilio could not be reached for calling")
+            log_activity(connection, user, "DRIVER_CALL_CLIENT", f"Started a masked call for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Calling client through BudHub relay")
         if action == "driver_verify_payment" and ticket["payment_status"] == "PENDING" and ticket["payment_method"] == "CASH" and ticket["fulfillment_type"] == "DELIVERY" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
             update_ticket(connection, ticket_id, payment_status="VERIFIED", driver_id=user["id"], internal_note="Cash delivery payment verified by driver.")
             log_activity(connection, user, "DRIVER_VERIFY_PAYMENT", f"Verified cash delivery payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
@@ -10966,6 +11190,12 @@ def application(environ, start_response):
             return handle_browser_console_log(environ, start_response, user)
         if path == "/engineer/console-events" and method == "GET":
             return serve_engineer_console_events(environ, start_response, user)
+        if path == "/twilio/voice/incoming" and method in {"GET", "POST"}:
+            return handle_twilio_incoming_call(environ, start_response, connection)
+        if path == "/twilio/voice/driver-bridge" and method in {"GET", "POST"}:
+            return handle_twilio_driver_bridge(environ, start_response, connection)
+        if path == "/twilio/voice/status" and method in {"GET", "POST"}:
+            return handle_twilio_call_status(environ, start_response, connection)
         if path == "/driver/location" and method == "POST":
             return handle_driver_location(environ, start_response, connection, user)
         if path not in {"/engineer/console-events", "/engineer/browser-log"}:
