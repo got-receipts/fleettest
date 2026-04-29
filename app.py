@@ -2540,6 +2540,8 @@ def redirect(start_response, location, cookie_header=None):
 
 
 def text_response(start_response, body, status="200 OK", content_type="text/html; charset=utf-8"):
+    if body is None:
+        body = ""
     start_response(status, [("Content-Type", content_type)])
     return [body.encode("utf-8")]
 
@@ -9226,8 +9228,52 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         f"<option value='{driver['id']}'>{html.escape(driver['name'])}</option>"
         for driver in connection.execute("SELECT id, name FROM users WHERE role = 'driver' ORDER BY name").fetchall()
     )
+
+    def render_picker_ready_dispatch_actions(ticket, index, include_note=False):
+        create_panel_id = f"picker-block-panel-{ticket['id']}-{index}"
+        direct_panel_id = f"picker-direct-panel-{ticket['id']}-{index}"
+        block_options = "".join(
+            f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>"
+            for block in open_blocks
+            if (block["delivery_zone"] or "") == (ticket["delivery_zone"] or "")
+        )
+        return f"""
+        {f"<div class='tracker-note warning-note'>Manual dispatch override can interfere with the automated dispatch system and may cause system bugs if used when auto flow is available.</div>" if include_note else ""}
+        <div class="ticket-actions">
+          <button type="button" class="button ghost" data-toggle-inline-panel="{create_panel_id}">Manual Block Creation</button>
+          <button type="button" class="button ghost" data-toggle-inline-panel="{direct_panel_id}">Block Bypass to Driver</button>
+        </div>
+        <div class="details-panel is-hidden" id="{create_panel_id}">
+          <div class="ticket-actions">
+            <form method="post" action="/orders/update" class="action-stack">
+              <input type="hidden" name="order_id" value="{ticket["id"]}">
+              <input type="hidden" name="action" value="create_block_for_ticket">
+              <button type="submit">Create New Block</button>
+            </form>
+            <form method="post" action="/orders/update" class="action-stack">
+              <input type="hidden" name="order_id" value="{ticket["id"]}">
+              <input type="hidden" name="action" value="assign_to_block">
+              <label>Open Block<select name="block_id" required><option value="">Choose block</option>{block_options}</select></label>
+              <button type="submit" {'disabled' if not block_options else ''}>Add to Existing Block</button>
+            </form>
+            {"<p class='subtle'>No open same-zone blocks are available right now. Create a new block or wait for the automated queue.</p>" if not block_options else ""}
+          </div>
+        </div>
+        <div class="details-panel is-hidden" id="{direct_panel_id}">
+          <div class="ticket-actions">
+            <form method="post" action="/orders/update" class="action-stack">
+              <input type="hidden" name="order_id" value="{ticket["id"]}">
+              <input type="hidden" name="action" value="assign_direct_driver">
+              <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
+              <button type="submit">Bypass Blocks and Queue Driver</button>
+            </form>
+          </div>
+        </div>
+        """
     picker_block_cards = []
     processed_cards = []
+    ready_dispatch_cards = []
+    non_dispatch_processed_cards = []
     cards = []
     for index, ticket in enumerate(live_tickets):
         actions = "<span class='subtle'>Waiting on another team member.</span>"
@@ -9245,45 +9291,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
                 <label>Review Reason<textarea name="reason" required placeholder="Why does this need a product change?"></textarea></label>
                 <button type="submit">Send to Customer for Changes</button>
               </form>
-            </div>
-            """
-        elif ticket["status"] == "READY_FOR_DISPATCH":
-            create_panel_id = f"picker-block-panel-{ticket['id']}-{index}"
-            direct_panel_id = f"picker-direct-panel-{ticket['id']}-{index}"
-            block_options = "".join(
-                f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>"
-                for block in open_blocks
-                if (block["delivery_zone"] or "") == (ticket["delivery_zone"] or "")
-            )
-            actions = f"""
-            <div class="ticket-actions">
-              <button type="button" class="button ghost" data-toggle-inline-panel="{create_panel_id}">Block Creation</button>
-              <button type="button" class="button ghost" data-toggle-inline-panel="{direct_panel_id}">Separate Driver Queue</button>
-            </div>
-            <div class="details-panel is-hidden" id="{create_panel_id}">
-              <div class="ticket-actions">
-                <form method="post" action="/orders/update" class="action-stack">
-                  <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="create_block_for_ticket">
-                  <button type="submit">Create New Block</button>
-                </form>
-                <form method="post" action="/orders/update" class="action-stack">
-                  <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="assign_to_block">
-                  <label>Open Block<select name="block_id" required><option value="">Choose block</option>{block_options}</select></label>
-                  <button type="submit" {'disabled' if not block_options else ''}>Add to Existing Block</button>
-                </form>
-              </div>
-            </div>
-            <div class="details-panel is-hidden" id="{direct_panel_id}">
-              <div class="ticket-actions">
-                <form method="post" action="/orders/update" class="action-stack">
-                  <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="assign_direct_driver">
-                  <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
-                  <button type="submit">Bypass Blocks and Queue Driver</button>
-                </form>
-              </div>
             </div>
             """
         modal_id = f"picker-ticket-{ticket['id']}-{index}"
@@ -9346,9 +9353,15 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Method: {html.escape(payment_method_label(ticket['payment_method']))}</span>
         </div>
         {render_item_list(items_map.get(ticket['id'], []))}
+        {render_picker_ready_dispatch_actions(ticket, index, include_note=True) if ticket['status'] == 'READY_FOR_DISPATCH' else ''}
         {render_order_chat(ticket, user, message_map.get(ticket['id'], []))}
         """
-        processed_cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
+        rendered_card = render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"])
+        processed_cards.append(rendered_card)
+        if ticket["status"] == "READY_FOR_DISPATCH":
+            ready_dispatch_cards.append(rendered_card)
+        else:
+            non_dispatch_processed_cards.append(rendered_card)
     for block in open_blocks:
         block_tickets = connection.execute(
             """
@@ -9446,7 +9459,19 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <div><span class="eyebrow">Processed Orders</span><h3>Processed Waiting Block Orders</h3></div>
           <button type="button" class="button ghost modal-close" data-close-picker-widget="picker-processed-widget">Close</button>
         </div>
-        <div class="order-card-grid">{''.join(processed_cards) if processed_cards else '<p>No processed orders are waiting right now.</p>'}</div>
+        <div class="tracker-note warning-note">Manual block creation and direct-to-driver bypass live here for picked calls that are still waiting on dispatch. Use these only when the automated dispatch system cannot complete the handoff on its own.</div>
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="eyebrow">Manual Override Interface</span><h3>Completed but Pending Orders to Block or Send</h3></div>
+          </div>
+          <div class="order-card-grid">{''.join(ready_dispatch_cards) if ready_dispatch_cards else '<p>No processed calls are currently eligible for manual block creation or direct driver queue bypass.</p>'}</div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="eyebrow">Processed Visibility</span><h3>Other Processed Orders</h3></div>
+          </div>
+          <div class="order-card-grid">{''.join(non_dispatch_processed_cards) if non_dispatch_processed_cards else '<p>No other processed orders are waiting right now.</p>'}</div>
+        </section>
       </div>
     </div>
     {block_widget_markup("picker-pending-blocks-widget", "Pending Blocks to Send", pending_blocks, "No pending blocks waiting for drivers.")}
