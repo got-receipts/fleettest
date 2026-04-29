@@ -2861,6 +2861,10 @@ tbody tr:hover {
 }
 
 @media (max-width: 640px) {
+  .product-ribbon {
+    display: none;
+  }
+
   .product-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.55rem;
@@ -2917,6 +2921,11 @@ tbody tr:hover {
 
   .card-buttons {
     gap: 0.35rem;
+  }
+
+  .product-rating-summary.is-empty,
+  .product-review-panel.is-empty {
+    display: none;
   }
 
   .dashboard-topbar {

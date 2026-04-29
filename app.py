@@ -1121,7 +1121,8 @@ def render_product_rating_summary(stats):
     average = float(stats.get("average", 0) or 0)
     stars = "".join("★" if index <= round(average) else "☆" for index in range(1, 6))
     label = f"{average:.1f} ({count})" if count else "No reviews yet"
-    return f"<div class='product-rating-summary' aria-label='{html.escape(label)}'><span>{stars}</span><strong>{html.escape(label)}</strong></div>"
+    empty_class = " is-empty" if not count else ""
+    return f"<div class='product-rating-summary{empty_class}' aria-label='{html.escape(label)}'><span>{stars}</span><strong>{html.escape(label)}</strong></div>"
 
 
 def product_review_stats_map(connection):
@@ -1215,12 +1216,13 @@ def render_product_detail_extra(connection, product, user, stats, reviews):
           <button type="submit">Submit Verified Review</button>
         </form>
         """
+    review_panel_class = "product-review-panel is-empty" if not reviews else "product-review-panel"
     return f"""
     <template id="product-detail-extra-{product['id']}">
       <div class="product-detail-extra">
         {f'<div class="product-detail-meta-grid">{meta_markup}</div>' if meta_markup else '<p class="subtle">No extra product details have been added yet.</p>'}
         {render_tier_price_list(product)}
-        <section class="product-review-panel">
+        <section class="{review_panel_class}">
           <div class="panel-head">
             <div>
               <span class="eyebrow">Customer Rating</span>
