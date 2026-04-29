@@ -3073,6 +3073,7 @@ def init_db():
         ensure_column(connection, "delivery_blocks", "planned_distance_miles REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "delivery_blocks", "planned_duration_minutes INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "delivery_blocks", "last_optimized_at TEXT")
+        ensure_column(connection, "delivery_blocks", "completed_at TEXT")
         ensure_column(connection, "address_coordinates", "provider TEXT NOT NULL DEFAULT 'MANUAL'")
         ensure_column(connection, "address_coordinates", "status TEXT NOT NULL DEFAULT 'PENDING'")
         ensure_column(connection, "address_coordinates", "last_error TEXT")
@@ -7355,10 +7356,24 @@ def auto_assignable_drivers(connection):
     return cooled_down or available
 
 
-def submit_block_to_driver(connection, block_id, driver_id, dispatcher_id, automated=False):
+def driver_active_block_count(connection, driver_id):
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM delivery_blocks
+        WHERE driver_id = ? AND status = 'SUBMITTED'
+        """,
+        (driver_id,),
+    ).fetchone()
+    return int(row["count"] or 0) if row else 0
+
+
+def submit_block_to_driver(connection, block_id, driver_id, dispatcher_id, automated=False, override_multiple_blocks=False):
     block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
     driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (driver_id,)).fetchone()
     if not block or block["status"] != "OPEN" or not driver:
+        return False
+    if not automated and not override_multiple_blocks and driver_active_block_count(connection, driver["id"]) >= 1:
         return False
     block_tickets = connection.execute(
         "SELECT id, delivery_zone FROM tickets WHERE delivery_block_id = ? AND status = 'READY_FOR_DISPATCH' ORDER BY created_at ASC, id ASC",
@@ -7857,6 +7872,60 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         {''.join(render_store_chip(option, store_url(filters, strain=option), active=filters["strain"] == option, kind="strain") for option in STRAIN_FILTER_OPTIONS)}
       </div>
     </div>
+    """
+
+
+def render_toggle_panel_script():
+    return """
+    <script>
+      (function () {
+        document.querySelectorAll('[data-toggle-inline-panel]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var panel = document.getElementById(button.getAttribute('data-toggle-inline-panel'));
+            if (!panel) {
+              return;
+            }
+            panel.classList.toggle('is-hidden');
+          });
+        });
+      })();
+    </script>
+    """
+
+
+def render_dispatcher_automation_warning():
+    return """
+    <div class="modal-shell is-hidden" id="dispatcher-automation-warning">
+      <div class="modal-backdrop" data-close-dispatch-warning="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Automated Role</span>
+            <h3>Manual Dispatch Warning</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-dispatch-warning="yes">Close</button>
+        </div>
+        <div class="tracker-note warning-note">The role you logged into is an automated role and by interfering with it could cause issues or system bugs. Please refrain from using manual system unless absolutely required.</div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var modal = document.getElementById('dispatcher-automation-warning');
+        if (!modal) {
+          return;
+        }
+        function closeModal() {
+          modal.classList.add('is-hidden');
+        }
+        modal.querySelectorAll('[data-close-dispatch-warning="yes"]').forEach(function (node) {
+          node.addEventListener('click', closeModal);
+        });
+        if (!window.sessionStorage.getItem('dispatcher-automation-warning-seen')) {
+          modal.classList.remove('is-hidden');
+          window.sessionStorage.setItem('dispatcher-automation-warning-seen', '1');
+        }
+      })();
+    </script>
     """
     menu_markup = f"""
     <div class="store-layout">
@@ -8961,6 +9030,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
               <input type="hidden" name="block_id" value="{block["id"]}">
               <input type="hidden" name="action" value="submit_block">
               <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
+              <label class="checkbox-row"><input type="checkbox" name="override_dispatch" value="1"> Override multi-block safeguard if this driver already has an active block</label>
               <button type="submit" {'disabled' if not can_submit else ''}>Submit Block to Driver</button>
             </form>
             """
@@ -9138,15 +9208,28 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
     {render_credit_issue_panel(connection)}
     {render_activity_list(connection, user["id"], title="Your Dispatch Activity")}
     """
-    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_driver_emergency_widget_script())
+    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_driver_emergency_widget_script() + render_dispatcher_automation_warning())
 
 
 def render_picker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
-    tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED', 'READY_FOR_DISPATCH', 'READY_FOR_PICKUP')", ())
+    live_tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED')", ())
+    processed_tickets = ticket_rows(connection, "WHERE tickets.status IN ('READY_FOR_DISPATCH', 'READY_FOR_PICKUP', 'DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')", ())
+    tickets = live_tickets + processed_tickets
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    all_blocks = delivery_block_rows(connection)
+    open_blocks = [block for block in all_blocks if block["status"] == "OPEN"]
+    pending_blocks = [block for block in open_blocks if int(block["active_ticket_count"] or 0) > 0]
+    sent_blocks = [block for block in all_blocks if block["status"] == "SUBMITTED"]
+    completed_blocks = [block for block in all_blocks if block["status"] == "CLOSED"]
+    driver_options = "".join(
+        f"<option value='{driver['id']}'>{html.escape(driver['name'])}</option>"
+        for driver in connection.execute("SELECT id, name FROM users WHERE role = 'driver' ORDER BY name").fetchall()
+    )
+    picker_block_cards = []
+    processed_cards = []
     cards = []
-    for index, ticket in enumerate(tickets):
+    for index, ticket in enumerate(live_tickets):
         actions = "<span class='subtle'>Waiting on another team member.</span>"
         if ticket["status"] == "PACKING":
             actions = f"""
@@ -9162,6 +9245,45 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
                 <label>Review Reason<textarea name="reason" required placeholder="Why does this need a product change?"></textarea></label>
                 <button type="submit">Send to Customer for Changes</button>
               </form>
+            </div>
+            """
+        elif ticket["status"] == "READY_FOR_DISPATCH":
+            create_panel_id = f"picker-block-panel-{ticket['id']}-{index}"
+            direct_panel_id = f"picker-direct-panel-{ticket['id']}-{index}"
+            block_options = "".join(
+                f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>"
+                for block in open_blocks
+                if (block["delivery_zone"] or "") == (ticket["delivery_zone"] or "")
+            )
+            actions = f"""
+            <div class="ticket-actions">
+              <button type="button" class="button ghost" data-toggle-inline-panel="{create_panel_id}">Block Creation</button>
+              <button type="button" class="button ghost" data-toggle-inline-panel="{direct_panel_id}">Separate Driver Queue</button>
+            </div>
+            <div class="details-panel is-hidden" id="{create_panel_id}">
+              <div class="ticket-actions">
+                <form method="post" action="/orders/update" class="action-stack">
+                  <input type="hidden" name="order_id" value="{ticket["id"]}">
+                  <input type="hidden" name="action" value="create_block_for_ticket">
+                  <button type="submit">Create New Block</button>
+                </form>
+                <form method="post" action="/orders/update" class="action-stack">
+                  <input type="hidden" name="order_id" value="{ticket["id"]}">
+                  <input type="hidden" name="action" value="assign_to_block">
+                  <label>Open Block<select name="block_id" required><option value="">Choose block</option>{block_options}</select></label>
+                  <button type="submit" {'disabled' if not block_options else ''}>Add to Existing Block</button>
+                </form>
+              </div>
+            </div>
+            <div class="details-panel is-hidden" id="{direct_panel_id}">
+              <div class="ticket-actions">
+                <form method="post" action="/orders/update" class="action-stack">
+                  <input type="hidden" name="order_id" value="{ticket["id"]}">
+                  <input type="hidden" name="action" value="assign_direct_driver">
+                  <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
+                  <button type="submit">Bypass Blocks and Queue Driver</button>
+                </form>
+              </div>
             </div>
             """
         modal_id = f"picker-ticket-{ticket['id']}-{index}"
@@ -9194,20 +9316,167 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         {render_item_list(items_map.get(ticket["id"], []))}
         {f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>" if ticket['review_reason'] else ""}
         {actions}
-        {f"<div class='ticket-actions'><form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='picker_verify_payment'><button type='submit'>Verify Pickup Payment</button></form></div>" if ticket['status'] == 'READY_FOR_PICKUP' and ticket['payment_status'] == 'PENDING' else ""}
+        {f"<div class='ticket-actions'><form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='picker_verify_payment'><button type='submit'>Verify Payment</button></form></div>" if ticket['payment_status'] == 'PENDING' and ticket['status'] not in {'CANCELED', 'DELIVERED'} else ""}
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
         cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
+    for index, ticket in enumerate(processed_tickets):
+        modal_id = f"processed-picker-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div><span class="eyebrow">Processed Order</span><h3>{html.escape(ticket["ticket_number"])}</h3></div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>{html.escape(ticket["client_name"])}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
+          <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
+        </div>
+        """
+        detail_html = f"""
+        <div class='order-meta'>
+          <span>Total Units: {ticket['total_units']}</span>
+          <span>Type: {html.escape(ticket['fulfillment_type'].title())}</span>
+          <span>Dispatch: {html.escape(ticket['dispatcher_name'] or 'Open board')}</span>
+          <span>Contact: {html.escape(ticket['contact_name'] or ticket['client_name'])}</span>
+          <span>Phone: {html.escape(ticket['contact_phone'] or 'Not provided')}</span>
+          <span>Address: {html.escape(ticket['shipping_address'])}</span>
+          <span>Payment: {html.escape(ticket['payment_status'])}</span>
+          <span>Method: {html.escape(payment_method_label(ticket['payment_method']))}</span>
+        </div>
+        {render_item_list(items_map.get(ticket['id'], []))}
+        {render_order_chat(ticket, user, message_map.get(ticket['id'], []))}
+        """
+        processed_cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
+    for block in open_blocks:
+        block_tickets = connection.execute(
+            """
+            SELECT id, ticket_number, client_name
+            FROM (
+                SELECT tickets.id AS id, tickets.ticket_number AS ticket_number, users.name AS client_name
+                FROM tickets
+                JOIN users ON users.id = tickets.client_id
+                WHERE tickets.delivery_block_id = ? AND tickets.status NOT IN ('CANCELED', 'DELIVERED')
+                ORDER BY tickets.created_at ASC, tickets.id ASC
+            )
+            """,
+            (block["id"],),
+        ).fetchall()
+        picker_block_cards.append(
+            f"""
+            <article class="order-card">
+              <div class="order-card-head">
+                <div><span class="eyebrow">Picker Block Control</span><h3>{html.escape(block["block_name"])}</h3></div>
+                <span class="menu-count">{int(block["active_ticket_count"] or 0)}/{BLOCK_SIZE}</span>
+              </div>
+              <div class="order-meta">
+                <span>Zone: {html.escape(delivery_zone_label(block["delivery_zone"]))}</span>
+                <span>Status: {html.escape(block["status"].title())}</span>
+                <span>Driver: {html.escape(block["driver_name"] or 'Unassigned')}</span>
+              </div>
+              <div class="chat-thread">
+                {''.join(f"<div class='chat-message'><strong>{html.escape(row['ticket_number'])}</strong><p>{html.escape(row['client_name'])}</p></div>" for row in block_tickets) or "<p class='subtle'>No active tickets in this block.</p>"}
+              </div>
+              <form method="post" action="/orders/update" class="action-stack">
+                <input type="hidden" name="order_id" value="{block_tickets[0]['id'] if block_tickets else 0}">
+                <input type="hidden" name="block_id" value="{block["id"]}">
+                <input type="hidden" name="action" value="submit_block">
+                <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
+                <label class="checkbox-row"><input type="checkbox" name="override_dispatch" value="1"> Override multi-block safeguard if this driver already has an active block</label>
+                <button type="submit" {'disabled' if block["status"] != "OPEN" or int(block["active_ticket_count"] or 0) != BLOCK_SIZE else ''}>Push Block to Driver</button>
+              </form>
+            </article>
+            """
+        )
+    def block_widget_markup(widget_id, title, blocks_to_render, empty_text):
+        cards_markup = "".join(
+            f"""
+            <article class='order-card'>
+              <div class='order-card-head'>
+                <div><span class='eyebrow'>{html.escape(title)}</span><h3>{html.escape(block['block_name'])}</h3></div>
+                <span class='menu-count'>{html.escape(block['status'].title())}</span>
+              </div>
+              <div class='order-meta'>
+                <span>Zone: {html.escape(delivery_zone_label(block['delivery_zone']))}</span>
+                <span>Driver: {html.escape(block['driver_name'] or 'Unassigned')}</span>
+                <span>Tickets: {int(block['active_ticket_count'] or 0)}/{BLOCK_SIZE}</span>
+              </div>
+            </article>
+            """
+            for block in blocks_to_render
+        ) or f"<p>{html.escape(empty_text)}</p>"
+        return f"""
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="eyebrow">Picker Widget</span><h2>{html.escape(title)}</h2></div>
+            <button type="button" class="button ghost" data-open-picker-widget="{widget_id}">Open</button>
+          </div>
+        </section>
+        <div class="modal-shell is-hidden" id="{widget_id}">
+          <div class="modal-backdrop" data-close-picker-widget="{widget_id}"></div>
+          <div class="modal-card modal-card-wide">
+            <div class="panel-head">
+              <div><span class="eyebrow">Picker Widget</span><h3>{html.escape(title)}</h3></div>
+              <button type="button" class="button ghost modal-close" data-close-picker-widget="{widget_id}">Close</button>
+            </div>
+            <div class="order-card-grid">{cards_markup}</div>
+          </div>
+        </div>
+        """
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
-      <div class="stat-card"><span>Ready to Pack</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'PACKING')}</strong></div>
-      <div class="stat-card"><span>Visible Tickets</span><strong>{len(tickets)}</strong></div>
+      <div class="stat-card"><span>Ready to Pack</span><strong>{sum(1 for ticket in live_tickets if ticket['status'] == 'PACKING')}</strong></div>
+      <div class="stat-card"><span>Needs Review</span><strong>{sum(1 for ticket in live_tickets if ticket['status'] == 'REVIEW_REQUIRED')}</strong></div>
+      <div class="stat-card"><span>Processed Waiting</span><strong>{len(processed_tickets)}</strong></div>
+      <div class="stat-card"><span>Pending Blocks</span><strong>{len(pending_blocks)}</strong></div>
     </section>
+    <section class="panel">
+      <div class="panel-head">
+        <div><span class="eyebrow">Processed Orders</span><h2>Waiting Block Widget</h2></div>
+        <button type="button" class="button ghost" data-open-picker-widget="picker-processed-widget">Open</button>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="picker-processed-widget">
+      <div class="modal-backdrop" data-close-picker-widget="picker-processed-widget"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div><span class="eyebrow">Processed Orders</span><h3>Processed Waiting Block Orders</h3></div>
+          <button type="button" class="button ghost modal-close" data-close-picker-widget="picker-processed-widget">Close</button>
+        </div>
+        <div class="order-card-grid">{''.join(processed_cards) if processed_cards else '<p>No processed orders are waiting right now.</p>'}</div>
+      </div>
+    </div>
+    {block_widget_markup("picker-pending-blocks-widget", "Pending Blocks to Send", pending_blocks, "No pending blocks waiting for drivers.")}
+    {block_widget_markup("picker-sent-blocks-widget", "Sent Blocks Already Queued", sent_blocks, "No submitted blocks are currently in driver queues.")}
+    {block_widget_markup("picker-completed-blocks-widget", "Completed Blocks", completed_blocks, "No completed block history yet.")}
+    <section class="panel"><h2>Picker Dispatch Controls</h2><div class="order-card-grid">{''.join(picker_block_cards) if picker_block_cards else '<p>No open blocks waiting for manual push.</p>'}</div></section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
     """
-    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
+    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_toggle_panel_script() + """
+    <script>
+      (function () {
+        document.querySelectorAll('[data-open-picker-widget]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-open-picker-widget'));
+            if (modal) {
+              modal.classList.remove('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-close-picker-widget]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-close-picker-widget'));
+            if (modal) {
+              modal.classList.add('is-hidden');
+            }
+          });
+        });
+      })();
+    </script>
+    """)
 
 
 def render_driver_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
@@ -9728,9 +9997,16 @@ def refresh_delivery_block_status(connection, block_id):
     active_count = count_row["count"] if count_row else 0
     if active_count == 0:
         delete_route_plan_for_block(connection, block_id)
-        connection.execute("DELETE FROM delivery_blocks WHERE id = ?", (block_id,))
+        connection.execute(
+            "UPDATE delivery_blocks SET status = 'CLOSED', completed_at = ?, updated_at = ? WHERE id = ?",
+            (now_iso(), now_iso(), block_id),
+        )
         return
-    connection.execute("UPDATE delivery_blocks SET updated_at = ? WHERE id = ?", (now_iso(), block_id))
+    updates = ["updated_at = ?"]
+    values = [now_iso()]
+    if block["status"] == "CLOSED":
+        updates.extend(["status = 'OPEN'", "completed_at = NULL"])
+    connection.execute(f"UPDATE delivery_blocks SET {', '.join(updates)} WHERE id = ?", (*values, block_id))
     if route_plan_for_block(connection, block_id):
         upsert_route_plan_for_block(connection, block_id, block["route_provider"])
 
@@ -10478,7 +10754,7 @@ def handle_twilio_call_status(environ, start_response, connection):
 
 
 def handle_update_order(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"banker", "dispatcher", "picker", "driver", "client"})
+    gate = require_role(start_response, user, {"banker", "dispatcher", "picker", "driver", "client", "admin"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -10579,9 +10855,9 @@ def handle_update_order(environ, start_response, connection, user):
         return redirect(start_response, "/dashboard?message=That customer action is not allowed")
 
     if user["role"] == "picker":
-        if action == "picker_verify_payment" and ticket["status"] == "READY_FOR_PICKUP" and ticket["payment_status"] == "PENDING":
-            update_ticket(connection, ticket_id, payment_status="VERIFIED", picker_id=user["id"], internal_note="Pickup payment verified by picker.")
-            log_activity(connection, user, "PICKER_VERIFY_PAYMENT", f"Verified pickup payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+        if action == "picker_verify_payment" and ticket["payment_status"] == "PENDING" and ticket["status"] not in {"CANCELED", "DELIVERED"}:
+            update_ticket(connection, ticket_id, payment_status="VERIFIED", picker_id=user["id"], internal_note="Payment verified by picker.")
+            log_activity(connection, user, "PICKER_VERIFY_PAYMENT", f"Verified payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Payment verified")
         if action == "pack_order" and ticket["status"] == "PACKING":
@@ -10601,9 +10877,57 @@ def handle_update_order(environ, start_response, connection, user):
             update_ticket(connection, ticket_id, status="REVIEW_REQUIRED", picker_id=user["id"], review_reason=reason, driver_id=None)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket returned to the customer for item changes")
+        if action == "create_block_for_ticket" and ticket["status"] == "READY_FOR_DISPATCH":
+            if ticket["delivery_block_id"]:
+                return redirect(start_response, "/dashboard?message=This ticket is already assigned to a block")
+            block_id = create_delivery_block(connection, user["id"], ticket["delivery_zone"])
+            block_name = connection.execute("SELECT block_name FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()["block_name"]
+            update_ticket(connection, ticket_id, delivery_block_id=block_id, dispatcher_id=user["id"], internal_note=f"Picker created block {block_name}")
+            refresh_delivery_block_status(connection, block_id)
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket added to new block")
+        if action == "assign_to_block" and ticket["status"] == "READY_FOR_DISPATCH":
+            if ticket["delivery_block_id"]:
+                return redirect(start_response, "/dashboard?message=This ticket is already assigned to a block")
+            block_id = int(data.get("block_id", "0"))
+            block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+            if not block or block["status"] != "OPEN":
+                return redirect(start_response, "/dashboard?message=Choose a valid open block")
+            if (block["delivery_zone"] or "") != (ticket["delivery_zone"] or ""):
+                return redirect(start_response, "/dashboard?message=That block belongs to a different delivery zone")
+            block_ticket_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM tickets WHERE delivery_block_id = ? AND status NOT IN ('CANCELED', 'DELIVERED')",
+                (block_id,),
+            ).fetchone()["count"]
+            if block_ticket_count >= BLOCK_SIZE:
+                return redirect(start_response, f"/dashboard?message=That block already has {BLOCK_SIZE} tickets")
+            update_ticket(connection, ticket_id, delivery_block_id=block_id, dispatcher_id=user["id"], internal_note=f"Picker added ticket to block {block['block_name']}")
+            refresh_delivery_block_status(connection, block_id)
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket assigned to block")
+        if action == "assign_direct_driver" and ticket["status"] == "READY_FOR_DISPATCH":
+            driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
+            if not driver:
+                return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], delivery_block_id=None, internal_note=f"Picker bypassed block and queued ticket to driver {driver['name']}.")
+            refresh_delivery_block_status(connection, prior_block_id)
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket sent directly to driver queue")
+        if action == "submit_block" and ticket["status"] == "READY_FOR_DISPATCH":
+            block_id = int(data.get("block_id", "0"))
+            driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
+            if not driver:
+                return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            if driver_active_block_count(connection, driver["id"]) >= 1 and data.get("override_dispatch") != "1":
+                return redirect(start_response, "/dashboard?message=This driver already has an active block. Override is required to push another block.")
+            if not submit_block_to_driver(connection, block_id, driver["id"], user["id"], automated=False, override_multiple_blocks=data.get("override_dispatch") == "1"):
+                return redirect(start_response, f"/dashboard?message=Blocks need exactly {BLOCK_SIZE} ready tickets and a valid open state before manual submit")
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Block pushed to driver")
         return redirect(start_response, "/dashboard?message=That picker action is not allowed")
 
-    if user["role"] == "dispatcher":
+    if user["role"] in {"dispatcher", "admin"}:
         if action == "verify_payment" and ticket["payment_status"] == "PENDING" and ticket["status"] not in {"CANCELED", "DELIVERED"}:
             update_ticket(connection, ticket_id, payment_status="VERIFIED", dispatcher_id=user["id"], internal_note="Payment verified by dispatch.")
             log_activity(connection, user, "DISPATCH_VERIFY_PAYMENT", f"Verified payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
@@ -10685,29 +11009,10 @@ def handle_update_order(environ, start_response, connection, user):
             driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
-            block_tickets = connection.execute(
-                "SELECT id FROM tickets WHERE delivery_block_id = ? AND status = 'READY_FOR_DISPATCH' ORDER BY created_at ASC, id ASC",
-                (block_id,),
-            ).fetchall()
-            if len(block_tickets) != BLOCK_SIZE:
-                return redirect(start_response, f"/dashboard?message=Blocks need exactly {BLOCK_SIZE} ready tickets before dispatch can submit them")
-            upsert_route_plan_for_block(connection, block_id, block["route_provider"])
-            connection.execute(
-                "UPDATE delivery_blocks SET driver_id = ?, status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ?",
-                (driver["id"], now_iso(), now_iso(), block_id),
-            )
-            block_name = block["block_name"]
-            for block_ticket in block_tickets:
-                update_ticket(
-                    connection,
-                    block_ticket["id"],
-                    status="DRIVER_ASSIGNED",
-                    driver_id=driver["id"],
-                    dispatcher_id=user["id"],
-                    internal_note=f"Submitted in {block_name}",
-                )
-            increment_user_stat(connection, user["id"], "total_orders_dispatched", len(block_tickets))
-            log_activity(connection, user, "SUBMIT_BLOCK", f"Submitted block {block_name} with {len(block_tickets)} tickets to driver {driver['name']}.")
+            if driver_active_block_count(connection, driver["id"]) >= 1 and data.get("override_dispatch") != "1":
+                return redirect(start_response, "/dashboard?message=This driver already has an active block. Override is required to push another block.")
+            if not submit_block_to_driver(connection, block_id, driver["id"], user["id"], automated=False, override_multiple_blocks=data.get("override_dispatch") == "1"):
+                return redirect(start_response, f"/dashboard?message=Blocks need exactly {BLOCK_SIZE} ready tickets, a valid open state, and zone consistency before dispatch can submit them")
             connection.commit()
             return redirect(start_response, "/dashboard?message=Block submitted to driver")
         if action == "pull_back" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
