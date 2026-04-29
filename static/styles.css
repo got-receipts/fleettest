@@ -2861,6 +2861,64 @@ tbody tr:hover {
 }
 
 @media (max-width: 640px) {
+  .product-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+
+  .product-card {
+    min-height: 0;
+    padding: 0.62rem;
+    border-radius: 16px;
+  }
+
+  .product-card-image {
+    border-radius: 12px;
+    margin-bottom: 0.55rem;
+  }
+
+  .product-card-top h3 {
+    margin: 0.18rem 0 0.3rem;
+    font-size: 0.88rem;
+    line-height: 1.15;
+  }
+
+  .product-card p {
+    font-size: 0.72rem;
+    line-height: 1.25;
+  }
+
+  .product-card .eyebrow {
+    font-size: 0.56rem;
+    line-height: 1.15;
+  }
+
+  .product-meta-pills {
+    gap: 0.28rem;
+  }
+
+  .price-pill,
+  .strain-pill {
+    padding: 0.2rem 0.4rem;
+    font-size: 0.58rem;
+  }
+
+  .product-card .source-link,
+  .product-card .button,
+  .product-card button {
+    font-size: 0.7rem;
+    min-height: 34px;
+    padding: 0.42rem 0.5rem;
+  }
+
+  .product-detail-button {
+    margin: 0.12rem 0 0.45rem;
+  }
+
+  .card-buttons {
+    gap: 0.35rem;
+  }
+
   .dashboard-topbar {
     align-items: start;
     flex-direction: column;
