@@ -3099,7 +3099,14 @@ def seed_defaults(connection):
         ("Dispatch Lead", "dispatcher@ecommerce.local", "dispatch123", "dispatcher", ""),
         ("Warehouse Picker", "picker@ecommerce.local", "picker123", "picker", ""),
         ("Delivery Driver", "driver@ecommerce.local", "driver123", "driver", "+15183760338"),
+        ("Delivery Driver 2", "driver2@ecommerce.local", "driver123", "driver", ""),
+        ("Delivery Driver 3", "driver3@ecommerce.local", "driver123", "driver", ""),
         ("Demo Customer", "client@ecommerce.local", "client123", "client", ""),
+        ("Test Customer 1", "test1@ecommerce.local", "test123", "client", ""),
+        ("Test Customer 2", "test2@ecommerce.local", "test123", "client", ""),
+        ("Test Customer 3", "test3@ecommerce.local", "test123", "client", ""),
+        ("Test Customer 4", "test4@ecommerce.local", "test123", "client", ""),
+        ("Test Customer 5", "test5@ecommerce.local", "test123", "client", ""),
     ]
     for name, email, password, role, phone in users:
         existing = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
@@ -4545,6 +4552,14 @@ def register_form(error=""):
 
 def status_badge(status):
     return f'<span class="badge badge-{html.escape(status.lower())}">{html.escape(STATUS_LABELS.get(status, status))}</span>'
+
+
+def render_payment_status_badge(payment_status):
+    verified = (payment_status or "").upper() == "VERIFIED"
+    state_class = "is-verified" if verified else "is-pending"
+    icon = "&#10003;" if verified else "&#10005;"
+    label = "Payment Verified" if verified else "Payment Pending"
+    return f'<span class="payment-verification-badge {state_class}"><span class="payment-verification-icon">{icon}</span>{html.escape(label)}</span>'
 
 
 def client_cart_count(connection, user_id):
@@ -8556,6 +8571,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Driver: {html.escape(ticket["driver_name"] or 'Pending dispatch')}</span>
           <span>Zone: {html.escape(delivery_zone_label(ticket["delivery_zone"]))}</span>
@@ -8565,7 +8581,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
         detail_html = f"""
         <div class="order-meta">
-          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Total: {format_money(ticket["total_amount"])}</span>
@@ -8758,7 +8774,7 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
         </div>
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
-          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
         """
@@ -8771,7 +8787,7 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
           <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
           <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
-          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
@@ -8976,6 +8992,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
         </div>
         """
         maps_link = google_maps_link(ticket["shipping_address"])
@@ -8989,7 +9006,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
-          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
           <span>Zone: {html.escape(delivery_zone_label(ticket["delivery_zone"]))}</span>
         </div>
@@ -9272,7 +9289,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           </div>
         </div>
         """
-    picker_block_cards = []
     ready_dispatch_cards = []
     non_dispatch_processed_cards = []
     cards = []
@@ -9304,6 +9320,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Total Units: {ticket["total_units"]}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Open board')}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
         </div>
         """
         maps_link = google_maps_link(ticket["shipping_address"])
@@ -9316,7 +9333,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
           <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
-          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
         </div>
         {render_payment_instructions(ticket)}
@@ -9340,6 +9357,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
           <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
         </div>
         """
         detail_html = f"""
@@ -9350,7 +9368,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Contact: {html.escape(ticket['contact_name'] or ticket['client_name'])}</span>
           <span>Phone: {html.escape(ticket['contact_phone'] or 'Not provided')}</span>
           <span>Address: {html.escape(ticket['shipping_address'])}</span>
-          <span>Payment: {html.escape(ticket['payment_status'])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Method: {html.escape(payment_method_label(ticket['payment_method']))}</span>
         </div>
         {render_item_list(items_map.get(ticket['id'], []))}
@@ -9367,46 +9385,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
             ready_dispatch_cards.append(rendered_card)
         else:
             non_dispatch_processed_cards.append(rendered_card)
-    for block in open_blocks:
-        block_tickets = connection.execute(
-            """
-            SELECT id, ticket_number, client_name
-            FROM (
-                SELECT tickets.id AS id, tickets.ticket_number AS ticket_number, users.name AS client_name
-                FROM tickets
-                JOIN users ON users.id = tickets.client_id
-                WHERE tickets.delivery_block_id = ? AND tickets.status NOT IN ('CANCELED', 'DELIVERED')
-                ORDER BY tickets.created_at ASC, tickets.id ASC
-            )
-            """,
-            (block["id"],),
-        ).fetchall()
-        picker_block_cards.append(
-            f"""
-            <article class="order-card">
-              <div class="order-card-head">
-                <div><span class="eyebrow">Picker Block Control</span><h3>{html.escape(block["block_name"])}</h3></div>
-                <span class="menu-count">{int(block["active_ticket_count"] or 0)}/{BLOCK_SIZE}</span>
-              </div>
-              <div class="order-meta">
-                <span>Zone: {html.escape(delivery_zone_label(block["delivery_zone"]))}</span>
-                <span>Status: {html.escape(block["status"].title())}</span>
-                <span>Driver: {html.escape(block["driver_name"] or 'Unassigned')}</span>
-              </div>
-              <div class="chat-thread">
-                {''.join(f"<div class='chat-message'><strong>{html.escape(row['ticket_number'])}</strong><p>{html.escape(row['client_name'])}</p></div>" for row in block_tickets) or "<p class='subtle'>No active tickets in this block.</p>"}
-              </div>
-              <form method="post" action="/orders/update" class="action-stack">
-                <input type="hidden" name="order_id" value="{block_tickets[0]['id'] if block_tickets else 0}">
-                <input type="hidden" name="block_id" value="{block["id"]}">
-                <input type="hidden" name="action" value="submit_block">
-                <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
-                <label class="checkbox-row"><input type="checkbox" name="override_dispatch" value="1"> Override multi-block safeguard if this driver already has an active block</label>
-                <button type="submit" {'disabled' if block["status"] != "OPEN" or int(block["active_ticket_count"] or 0) != BLOCK_SIZE else ''}>Push Block to Driver</button>
-              </form>
-            </article>
-            """
-        )
     def block_widget_markup(widget_id, title, blocks_to_render, empty_text):
         cards_markup = "".join(
             f"""
@@ -9482,7 +9460,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
     {block_widget_markup("picker-pending-blocks-widget", "Pending Blocks to Send", pending_blocks, "No pending blocks waiting for drivers.")}
     {block_widget_markup("picker-sent-blocks-widget", "Sent Blocks Already Queued", sent_blocks, "No submitted blocks are currently in driver queues.")}
     {block_widget_markup("picker-completed-blocks-widget", "Completed Blocks", completed_blocks, "No completed block history yet.")}
-    <section class="panel"><h2>Picker Dispatch Controls</h2><div class="order-card-grid">{''.join(picker_block_cards) if picker_block_cards else '<p>No open blocks waiting for manual push.</p>'}</div></section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
     """
     return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_toggle_panel_script() + """
@@ -9546,6 +9523,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
         </div>
         {render_route_summary(ticket, route_stop)}
@@ -9566,7 +9544,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
           <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
-          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
@@ -9601,6 +9579,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Direct assignment')}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
           <span>Completed Route</span>
         </div>
         """
