@@ -7875,60 +7875,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
       </div>
     </div>
     """
-
-
-def render_toggle_panel_script():
-    return """
-    <script>
-      (function () {
-        document.querySelectorAll('[data-toggle-inline-panel]').forEach(function (button) {
-          button.addEventListener('click', function () {
-            var panel = document.getElementById(button.getAttribute('data-toggle-inline-panel'));
-            if (!panel) {
-              return;
-            }
-            panel.classList.toggle('is-hidden');
-          });
-        });
-      })();
-    </script>
-    """
-
-
-def render_dispatcher_automation_warning():
-    return """
-    <div class="modal-shell is-hidden" id="dispatcher-automation-warning">
-      <div class="modal-backdrop" data-close-dispatch-warning="yes"></div>
-      <div class="modal-card">
-        <div class="panel-head">
-          <div>
-            <span class="eyebrow">Automated Role</span>
-            <h3>Manual Dispatch Warning</h3>
-          </div>
-          <button type="button" class="button ghost modal-close" data-close-dispatch-warning="yes">Close</button>
-        </div>
-        <div class="tracker-note warning-note">The role you logged into is an automated role and by interfering with it could cause issues or system bugs. Please refrain from using manual system unless absolutely required.</div>
-      </div>
-    </div>
-    <script>
-      (function () {
-        var modal = document.getElementById('dispatcher-automation-warning');
-        if (!modal) {
-          return;
-        }
-        function closeModal() {
-          modal.classList.add('is-hidden');
-        }
-        modal.querySelectorAll('[data-close-dispatch-warning="yes"]').forEach(function (node) {
-          node.addEventListener('click', closeModal);
-        });
-        if (!window.sessionStorage.getItem('dispatcher-automation-warning-seen')) {
-          modal.classList.remove('is-hidden');
-          window.sessionStorage.setItem('dispatcher-automation-warning-seen', '1');
-        }
-      })();
-    </script>
-    """
     menu_markup = f"""
     <div class="store-layout">
       <div class="store-main">
@@ -8120,6 +8066,8 @@ def render_dispatcher_automation_warning():
         {brand_markup}
       </div>
     </section>
+    {menu_markup}
+    {menu_script}
     """
     return landing_page(
         APP_NAME,
@@ -8130,6 +8078,60 @@ def render_dispatcher_automation_warning():
         cart_count=cart_count,
         extra_shell=render_client_stats_widget(connection, user) + render_client_activity_widget(connection, user) + render_menu_overlay_shell(),
     )
+
+
+def render_toggle_panel_script():
+    return """
+    <script>
+      (function () {
+        document.querySelectorAll('[data-toggle-inline-panel]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var panel = document.getElementById(button.getAttribute('data-toggle-inline-panel'));
+            if (!panel) {
+              return;
+            }
+            panel.classList.toggle('is-hidden');
+          });
+        });
+      })();
+    </script>
+    """
+
+
+def render_dispatcher_automation_warning():
+    return """
+    <div class="modal-shell is-hidden" id="dispatcher-automation-warning">
+      <div class="modal-backdrop" data-close-dispatch-warning="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Automated Role</span>
+            <h3>Manual Dispatch Warning</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-dispatch-warning="yes">Close</button>
+        </div>
+        <div class="tracker-note warning-note">The role you logged into is an automated role and by interfering with it could cause issues or system bugs. Please refrain from using manual system unless absolutely required.</div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var modal = document.getElementById('dispatcher-automation-warning');
+        if (!modal) {
+          return;
+        }
+        function closeModal() {
+          modal.classList.add('is-hidden');
+        }
+        modal.querySelectorAll('[data-close-dispatch-warning="yes"]').forEach(function (node) {
+          node.addEventListener('click', closeModal);
+        });
+        if (!window.sessionStorage.getItem('dispatcher-automation-warning-seen')) {
+          modal.classList.remove('is-hidden');
+          window.sessionStorage.setItem('dispatcher-automation-warning-seen', '1');
+        }
+      })();
+    </script>
+    """
 
 
 def render_menu_page(connection, user=None, message=None, level="info", filters=None):
