@@ -1747,6 +1747,25 @@ button:disabled {
   text-align: center;
 }
 
+.payment-verified-notice {
+  display: grid;
+  justify-items: center;
+  gap: 0.6rem;
+}
+
+.payment-verified-badge {
+  display: grid;
+  place-items: center;
+  width: 4.4rem;
+  height: 4.4rem;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 30%, rgba(158, 255, 181, 0.42), rgba(18, 183, 106, 0.94));
+  color: #ffffff;
+  font-size: 2rem;
+  font-weight: 900;
+  box-shadow: 0 20px 42px rgba(18, 183, 106, 0.28);
+}
+
 .support-alert-card {
   border-color: rgba(255, 214, 102, 0.18);
 }

@@ -3185,6 +3185,8 @@ def cleanup_generated_tickets(connection):
 def flash_message(message, level="info"):
     if not message:
         return ""
+    if message in {"Payment verified", "Packed and returned to dispatch"}:
+        return ""
     return f'<div class="flash flash-{html.escape(level)}"><span>{html.escape(message)}</span></div>'
 
 
@@ -3940,6 +3942,8 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
     <span>NYS OCM Compliance notice. Must be 21 years of age to purchase. Smoke Responsibly.</span>
   </footer>
   {render_age_gate()}
+  {render_payment_verified_widget(message)}
+  {render_picker_packed_widget(message)}
   {extra_shell}
   {render_help_button(user)}
   {render_site_console_capture()}
@@ -4031,6 +4035,8 @@ def landing_page(title, body, user=None, message=None, level="info", cart_count=
     <span>NYS OCM Compliance notice. Must be 21 years of age to purchase. Smoke responsibly.</span>
   </footer>
   {render_age_gate()}
+  {render_payment_verified_widget(message)}
+  {render_picker_packed_widget(message)}
   {extra_shell}
   {render_help_button(user)}
   {render_site_console_capture()}
@@ -4188,6 +4194,8 @@ def dashboard_page(title, body, user=None, message=None, level="info", cart_coun
     </div>
   </div>
   {render_age_gate()}
+  {render_payment_verified_widget(message)}
+  {render_picker_packed_widget(message)}
   {extra_shell}
   {render_site_console_capture()}
   <script>
@@ -5445,6 +5453,29 @@ def render_center_notice_widget(modal_id, eyebrow, title, body, button_text="OK"
     """
 
 
+def render_payment_verified_widget(message):
+    if message != "Payment verified":
+        return ""
+    return """
+    <div class="modal-shell" id="payment-verified-modal">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card center-notice-card payment-verified-notice">
+        <div class="payment-verified-badge" aria-hidden="true">&#10003;</div>
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Payment Verified</span>
+            <h3>Payment verified</h3>
+          </div>
+        </div>
+        <p>The ticket payment was verified successfully and the order was updated across the workflow.</p>
+        <div class="hero-actions">
+          <a class="button" href="/dashboard">OK</a>
+        </div>
+      </div>
+    </div>
+    """
+
+
 def render_payment_block_widget(message):
     if message != "Delivery cannot be completed until the bank verifies payment":
         return ""
@@ -5468,14 +5499,7 @@ def render_picker_packed_widget(message):
 
 
 def render_banker_verified_widget(message):
-    if message != "Payment verified":
-        return ""
-    return render_center_notice_widget(
-        "banker-verified-modal",
-        "Payment Verified",
-        "Payment verified",
-        "The ticket payment was verified successfully and moved forward in the workflow.",
-    )
+    return render_payment_verified_widget(message)
 
 
 def render_driver_action_widget(message):
@@ -9237,7 +9261,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
 def render_picker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     live_tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED')", ())
     processed_tickets = ticket_rows(connection, "WHERE tickets.status IN ('READY_FOR_DISPATCH', 'READY_FOR_PICKUP', 'DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')", ())
-    tickets = live_tickets + processed_tickets
+    archived_delivery_tickets = ticket_rows(connection, "WHERE tickets.status = 'DELIVERED'", ())
+    tickets = live_tickets + processed_tickets + archived_delivery_tickets
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     all_blocks = delivery_block_rows(connection)
@@ -9291,8 +9316,45 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           </div>
         </div>
         """
+
+    def render_picker_history_modal(ticket, modal_id, eyebrow):
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class='order-meta'>
+          <span>Total Units: {ticket['total_units']}</span>
+          <span>Type: {html.escape(ticket['fulfillment_type'].title())}</span>
+          <span>Dispatch: {html.escape(ticket['dispatcher_name'] or 'Open board')}</span>
+          <span>Contact: {html.escape(ticket['contact_name'] or ticket['client_name'])}</span>
+          <span>Phone: {html.escape(ticket['contact_phone'] or 'Not provided')}</span>
+          <span>Address: {html.escape(ticket['shipping_address'])}</span>
+          <span>Driver: {html.escape(ticket['driver_name'] or 'Unassigned')}</span>
+          <span>Block: {html.escape(ticket['delivery_block_name'] or 'Not in block')}</span>
+          {render_payment_status_badge(ticket["payment_status"])}
+        </div>
+        {render_payment_instructions(ticket)}
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket['id'], []))}
+        {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
+        {render_order_chat(ticket, user, message_map.get(ticket['id'], []))}
+        """
+        return f"""
+        <div class="modal-shell is-hidden" id="{modal_id}">
+          <div class="modal-backdrop" data-close-picker-widget="{modal_id}"></div>
+          <div class="modal-card modal-card-wide">
+            <div class="panel-head">
+              <div><span class="eyebrow">{html.escape(eyebrow)}</span><h3>{html.escape(ticket['ticket_number'])}</h3></div>
+              <button type="button" class="button ghost modal-close" data-close-picker-widget="{modal_id}">Close</button>
+            </div>
+            {detail_html}
+          </div>
+        </div>
+        """
     ready_dispatch_cards = []
-    non_dispatch_processed_cards = []
+    active_delivery_cards = []
+    active_delivery_modals = []
+    archived_delivery_cards = []
+    archived_delivery_modals = []
     cards = []
     for index, ticket in enumerate(live_tickets):
         actions = "<span class='subtle'>Waiting on another team member.</span>"
@@ -9386,7 +9448,44 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         if ticket["status"] == "READY_FOR_DISPATCH":
             ready_dispatch_cards.append(rendered_card)
         else:
-            non_dispatch_processed_cards.append(rendered_card)
+            history_modal_id = f"picker-active-history-{ticket['id']}-{index}"
+            active_delivery_cards.append(
+                f"""
+                <article class="order-card">
+                  {summary_html}
+                  <div class="order-meta">
+                    <span>Dispatch: {html.escape(ticket['dispatcher_name'] or 'Open board')}</span>
+                    <span>Address: {html.escape(ticket['shipping_address'])}</span>
+                  </div>
+                  <div class="ticket-actions">
+                    <button type="button" class="button ghost" data-open-picker-widget="{history_modal_id}">View Order</button>
+                  </div>
+                </article>
+                """
+            )
+            active_delivery_modals.append(render_picker_history_modal(ticket, history_modal_id, "Active Delivery"))
+    for index, ticket in enumerate(archived_delivery_tickets):
+        archive_modal_id = f"picker-archived-history-{ticket['id']}-{index}"
+        archived_delivery_cards.append(
+            f"""
+            <article class="order-card">
+              <div class="order-card-head">
+                <div><span class="eyebrow">Archived Delivery</span><h3>{html.escape(ticket["ticket_number"])}</h3></div>
+                {status_badge(ticket["status"])}
+              </div>
+              <div class="order-meta">
+                <span>{html.escape(ticket["client_name"])}</span>
+                <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
+                <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
+                {render_payment_status_badge(ticket["payment_status"])}
+              </div>
+              <div class="ticket-actions">
+                <button type="button" class="button ghost" data-open-picker-widget="{archive_modal_id}">View Order</button>
+              </div>
+            </article>
+            """
+        )
+        archived_delivery_modals.append(render_picker_history_modal(ticket, archive_modal_id, "Archived Delivery"))
     def block_widget_markup(widget_id, title, blocks_to_render, empty_text):
         cards_markup = "".join(
             f"""
@@ -9451,14 +9550,42 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           </div>
           <div class="order-card-grid">{''.join(ready_dispatch_cards) if ready_dispatch_cards else '<p>No processed calls are currently eligible for manual block creation or direct driver queue bypass.</p>'}</div>
         </section>
-        <section class="panel">
-          <div class="panel-head">
-            <div><span class="eyebrow">Processed Visibility</span><h3>Other Processed Orders</h3></div>
-          </div>
-          <div class="order-card-grid">{''.join(non_dispatch_processed_cards) if non_dispatch_processed_cards else '<p>No other processed orders are waiting right now.</p>'}</div>
-        </section>
       </div>
     </div>
+    <section class="panel">
+      <div class="panel-head">
+        <div><span class="eyebrow">Delivery Visibility</span><h2>Active Deliveries</h2></div>
+        <button type="button" class="button ghost" data-open-picker-widget="picker-active-deliveries-widget">Open</button>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="picker-active-deliveries-widget">
+      <div class="modal-backdrop" data-close-picker-widget="picker-active-deliveries-widget"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div><span class="eyebrow">Delivery Visibility</span><h3>Active Deliveries</h3></div>
+          <button type="button" class="button ghost modal-close" data-close-picker-widget="picker-active-deliveries-widget">Close</button>
+        </div>
+        <div class="order-card-grid">{''.join(active_delivery_cards) if active_delivery_cards else '<p>No active deliveries are visible right now.</p>'}</div>
+      </div>
+    </div>
+    {''.join(active_delivery_modals)}
+    <section class="panel">
+      <div class="panel-head">
+        <div><span class="eyebrow">Delivery History</span><h2>Archived Deliveries</h2></div>
+        <button type="button" class="button ghost" data-open-picker-widget="picker-archived-deliveries-widget">Open</button>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="picker-archived-deliveries-widget">
+      <div class="modal-backdrop" data-close-picker-widget="picker-archived-deliveries-widget"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div><span class="eyebrow">Delivery History</span><h3>Archived Deliveries</h3></div>
+          <button type="button" class="button ghost modal-close" data-close-picker-widget="picker-archived-deliveries-widget">Close</button>
+        </div>
+        <div class="order-card-grid">{''.join(archived_delivery_cards) if archived_delivery_cards else '<p>No archived deliveries are available yet.</p>'}</div>
+      </div>
+    </div>
+    {''.join(archived_delivery_modals)}
     {block_widget_markup("picker-pending-blocks-widget", "Pending Blocks to Send", pending_blocks, "No pending blocks waiting for drivers.")}
     {block_widget_markup("picker-sent-blocks-widget", "Sent Blocks Already Queued", sent_blocks, "No submitted blocks are currently in driver queues.")}
     {block_widget_markup("picker-completed-blocks-widget", "Completed Blocks", completed_blocks, "No completed block history yet.")}
