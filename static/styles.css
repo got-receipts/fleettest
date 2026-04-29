@@ -2877,6 +2877,7 @@ tbody tr:hover {
   }
 
   .product-card-image {
+    aspect-ratio: 1 / 1;
     border-radius: 12px;
     margin-bottom: 0.55rem;
   }
@@ -2888,8 +2889,7 @@ tbody tr:hover {
   }
 
   .product-card p {
-    font-size: 0.72rem;
-    line-height: 1.25;
+    display: none;
   }
 
   .product-card .eyebrow {
