@@ -9442,7 +9442,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <div><span class="eyebrow">Processed Orders</span><h3>Processed Waiting Block Orders</h3></div>
           <button type="button" class="button ghost modal-close" data-close-picker-widget="picker-processed-widget">Close</button>
         </div>
-        <div class="tracker-note warning-note">Manual block creation and direct-to-driver bypass live here for picked calls that are still waiting on dispatch. Use these only when the automated dispatch system cannot complete the handoff on its own.</div>
+        <div class="tracker-note warning-note">Manually overriding block creation or direct-to-driver dispatch can cause system issues because BudHub is already running an automated dispatch system. Only use these controls when the automated handoff cannot complete on its own.</div>
         <section class="panel">
           <div class="panel-head">
             <div><span class="eyebrow">Manual Override Interface</span><h3>Completed but Pending Orders to Block or Send</h3></div>
