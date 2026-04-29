@@ -2893,8 +2893,7 @@ tbody tr:hover {
   }
 
   .product-card .eyebrow {
-    font-size: 0.56rem;
-    line-height: 1.15;
+    display: none;
   }
 
   .product-meta-pills {
