@@ -9271,7 +9271,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         </div>
         """
     picker_block_cards = []
-    processed_cards = []
     ready_dispatch_cards = []
     non_dispatch_processed_cards = []
     cards = []
@@ -9356,8 +9355,12 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         {render_picker_ready_dispatch_actions(ticket, index, include_note=True) if ticket['status'] == 'READY_FOR_DISPATCH' else ''}
         {render_order_chat(ticket, user, message_map.get(ticket['id'], []))}
         """
-        rendered_card = render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"])
-        processed_cards.append(rendered_card)
+        rendered_card = f"""
+        <article class="order-card">
+          {summary_html}
+          {detail_html}
+        </article>
+        """
         if ticket["status"] == "READY_FOR_DISPATCH":
             ready_dispatch_cards.append(rendered_card)
         else:
