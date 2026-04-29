@@ -9552,6 +9552,9 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         </section>
       </div>
     </div>
+    {block_widget_markup("picker-pending-blocks-widget", "Pending Blocks to Send", pending_blocks, "No pending blocks waiting for drivers.")}
+    {block_widget_markup("picker-sent-blocks-widget", "Sent Blocks Already Queued", sent_blocks, "No submitted blocks are currently in driver queues.")}
+    {block_widget_markup("picker-completed-blocks-widget", "Completed Blocks", completed_blocks, "No completed block history yet.")}
     <section class="panel">
       <div class="panel-head">
         <div><span class="eyebrow">Delivery Visibility</span><h2>Active Deliveries</h2></div>
@@ -9586,9 +9589,6 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
       </div>
     </div>
     {''.join(archived_delivery_modals)}
-    {block_widget_markup("picker-pending-blocks-widget", "Pending Blocks to Send", pending_blocks, "No pending blocks waiting for drivers.")}
-    {block_widget_markup("picker-sent-blocks-widget", "Sent Blocks Already Queued", sent_blocks, "No submitted blocks are currently in driver queues.")}
-    {block_widget_markup("picker-completed-blocks-widget", "Completed Blocks", completed_blocks, "No completed block history yet.")}
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
     """
     return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_toggle_panel_script() + """
