@@ -58,6 +58,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 STRAIN_NAMES_SOURCE_PATH = os.path.join(DATA_DIR, "strain_names_source.txt")
 UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "verification")
 PRODUCT_UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "products")
+PAYMENT_PROOF_UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "payment_proofs")
 SESSION_COOKIE = "budhub_session"
 AGE_GATE_COOKIE = "budhub_age_gate"
 APP_NAME = "Official BudHub"
@@ -264,6 +265,7 @@ POSTGRES_CREATE_STATEMENTS = [
         customer_note TEXT,
         status TEXT NOT NULL,
         payment_status TEXT NOT NULL,
+        payment_proof_path TEXT,
         coupon_code TEXT,
         discount_amount REAL DEFAULT 0,
         loyalty_discount_amount REAL DEFAULT 0,
@@ -2665,6 +2667,7 @@ def init_db():
     global CLEANUP_DONE
     os.makedirs(STATIC_DIR, exist_ok=True)
     os.makedirs(UPLOADS_DIR, exist_ok=True)
+    os.makedirs(PAYMENT_PROOF_UPLOADS_DIR, exist_ok=True)
     init_postgres_db()
     with db_connection() as connection:
         connection.executescript(
@@ -2758,6 +2761,7 @@ def init_db():
                 customer_note TEXT,
                 status TEXT NOT NULL,
                 payment_status TEXT NOT NULL,
+                payment_proof_path TEXT,
                 coupon_code TEXT,
                 discount_amount REAL NOT NULL DEFAULT 0,
                 loyalty_discount_amount REAL NOT NULL DEFAULT 0,
@@ -3073,6 +3077,7 @@ def init_db():
         ensure_column(connection, "tickets", "credit_applied REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "loyalty_points_used INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "loyalty_points_awarded INTEGER NOT NULL DEFAULT 0")
+        ensure_column(connection, "tickets", "payment_proof_path TEXT")
         ensure_column(connection, "tickets", "delivery_block_id INTEGER")
         ensure_column(connection, "delivery_blocks", "route_provider TEXT NOT NULL DEFAULT 'BUDHUB_NATIVE'")
         ensure_column(connection, "delivery_blocks", "delivery_zone TEXT NOT NULL DEFAULT ''")
@@ -3124,7 +3129,7 @@ def seed_defaults(connection):
         ("Dispatch Lead", "dispatcher@ecommerce.local", "dispatch123", "dispatcher", ""),
         ("Warehouse Picker", "picker@ecommerce.local", "picker123", "picker", ""),
         ("Delivery Driver", "driver@ecommerce.local", "driver123", "driver", "+15183760338"),
-        ("Delivery Driver 2", "driver2@ecommerce.local", "driver123", "driver", ""),
+        ("Delivery Driver 2", "driver2@ecommerce.local", "driver123", "driver", "+15183760338"),
         ("Delivery Driver 3", "driver3@ecommerce.local", "driver123", "driver", ""),
         ("Demo Customer", "client@ecommerce.local", "client123", "client", ""),
         ("Test Customer 1", "test1@ecommerce.local", "test123", "client", ""),
@@ -4647,6 +4652,56 @@ def render_payment_status_badge(payment_status):
     return f'<span class="payment-verification-badge {state_class}"><span class="payment-verification-icon">{icon}</span>{html.escape(label)}</span>'
 
 
+def render_payment_proof_widget(ticket):
+    proof_path = (ticket["payment_proof_path"] or "").strip()
+    upload_locked = ticket["status"] in {"DELIVERED", "CANCELED"}
+    preview = (
+        f"""
+        <div class="payment-proof-preview">
+          <span class="eyebrow">Payment Proof On File</span>
+          <img src="{html.escape(proof_path)}" alt="Payment proof for ticket {html.escape(ticket['ticket_number'])}" loading="lazy">
+          <a class="button ghost" href="{html.escape(proof_path)}" target="_blank" rel="noopener noreferrer">Open Full Image</a>
+        </div>
+        """
+        if proof_path
+        else """
+        <div class="payment-proof-placeholder">
+          <span class="eyebrow">Proof Placeholder</span>
+          <p>No proof of payment has been uploaded yet.</p>
+        </div>
+        """
+    )
+    if upload_locked:
+        form_markup = "<div class='tracker-note'>Payment proof uploads close once the order is delivered or canceled.</div>"
+    else:
+        form_markup = f"""
+        <form method="post" action="/orders/update" class="action-stack" enctype="multipart/form-data">
+          <input type="hidden" name="order_id" value="{ticket["id"]}">
+          <input type="hidden" name="action" value="upload_payment_proof">
+          <label class="file-drop-label">Upload Proof of Payment
+            <span class="subtle">Drag and drop a screenshot or receipt here, or tap to choose a file.</span>
+            <span class="file-drop-zone payment-proof-drop-zone">
+              <input type="file" name="payment_proof" accept=".jpg,.jpeg,.png,.webp,image/*" required>
+              <span class="payment-proof-drop-copy">Drop payment proof here or tap to upload</span>
+            </span>
+          </label>
+          <button type="submit">Upload Payment Proof</button>
+        </form>
+        """
+    return f"""
+    <section class="payment-proof-panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Payment Proof</span>
+          <h3>Proof of Payment</h3>
+        </div>
+      </div>
+      {preview}
+      {form_markup}
+    </section>
+    """
+
+
 def client_cart_count(connection, user_id):
     row = connection.execute("SELECT COALESCE(SUM(quantity), 0) AS count FROM cart_items WHERE user_id = ?", (user_id,)).fetchone()
     return row["count"] if row else 0
@@ -5227,6 +5282,24 @@ def save_verification_upload(user_id, label, file_info):
     with open(absolute_path, "wb") as handle:
         handle.write(content)
     return f"/static/uploads/verification/{saved_name}"
+
+
+def save_payment_proof_upload(ticket_id, file_info):
+    filename = file_info.get("filename") or ""
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in {".jpg", ".jpeg", ".png", ".webp"}:
+        extension = ".jpg"
+    content = file_info.get("content") or b""
+    if not content:
+        raise ValueError("Choose an image to upload as payment proof.")
+    if len(content) > 8 * 1024 * 1024:
+        raise ValueError("Payment proof images must be under 8MB.")
+    os.makedirs(PAYMENT_PROOF_UPLOADS_DIR, exist_ok=True)
+    saved_name = f"ticket_{ticket_id}_payment_proof_{secrets.token_hex(6)}{extension}"
+    absolute_path = os.path.join(PAYMENT_PROOF_UPLOADS_DIR, saved_name)
+    with open(absolute_path, "wb") as handle:
+        handle.write(content)
+    return f"/static/uploads/payment_proofs/{saved_name}"
 
 
 def restricted_account_page(user):
@@ -8716,6 +8789,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         </div>
         {render_route_summary(ticket, route_stop, driver_location, customer_view=True, live_eta_minutes=live_eta_minutes)}
         {render_payment_instructions(ticket)}
+        {render_payment_proof_widget(ticket)}
         {f"<div class='tracker-note'>Driver is on the way. Last location update: {html.escape(driver_location['created_at'])}</div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_location else ""}
         {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
@@ -11008,7 +11082,12 @@ def handle_update_order(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"banker", "dispatcher", "picker", "driver", "client", "admin"})
     if gate:
         return gate
-    data = read_post_data(environ)
+    content_type = environ.get("CONTENT_TYPE", "")
+    if "multipart/form-data" in content_type:
+        data, files = read_multipart_form(environ)
+    else:
+        data = read_post_data(environ)
+        files = {}
     ticket_id = int(data.get("order_id", "0"))
     action = data.get("action", "")
     if user["role"] == "dispatcher" and action == "save_route_coordinates":
@@ -11057,6 +11136,20 @@ def handle_update_order(environ, start_response, connection, user):
     if user["role"] == "client":
         if ticket["client_id"] != user["id"]:
             return redirect(start_response, "/dashboard?message=That order is not yours")
+        if action == "upload_payment_proof":
+            if ticket["status"] in {"DELIVERED", "CANCELED"}:
+                return redirect(start_response, f"/dashboard?message=Payment proof uploads are closed for this order&open_ticket={ticket_id}")
+            file_info = files.get("payment_proof")
+            if not file_info:
+                return redirect(start_response, f"/dashboard?message=Choose an image to upload as payment proof&open_ticket={ticket_id}")
+            try:
+                proof_path = save_payment_proof_upload(ticket_id, file_info)
+            except ValueError as exc:
+                return redirect(start_response, f"/dashboard?message={quote(str(exc))}&open_ticket={ticket_id}")
+            update_ticket(connection, ticket_id, payment_proof_path=proof_path, internal_note="Client uploaded proof of payment.")
+            log_activity(connection, user, "UPLOAD_PAYMENT_PROOF", f"Uploaded payment proof for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            connection.commit()
+            return redirect(start_response, f"/dashboard?message=Payment proof uploaded&open_ticket={ticket_id}")
         if action == "client_resolve_review" and ticket["status"] == "REVIEW_REQUIRED":
             items = ticket_items_map(connection, [ticket_id]).get(ticket_id, [])
             for item in items:
