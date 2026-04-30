@@ -11,6 +11,7 @@ import base64
 from collections import deque
 from datetime import datetime, timedelta
 from http import cookies
+from pathlib import Path
 from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -150,6 +151,8 @@ DEFAULT_PAYMENT_DESTINATIONS = [
     ("GOOGLE_PAY", "Google Pay", "BudHub Google Pay Desk", "", 1, 0),
     ("CASH", "Cash", "Pay in Person", "Bring cash for pickup orders or pay the driver directly at delivery.", 1, 1),
 ]
+BASE_DIR = Path(__file__).resolve().parent
+STAFF_ROSTER_PATH = BASE_DIR / "data" / "staff_accounts.json"
 
 POSTGRES_CREATE_STATEMENTS = [
     """
@@ -3093,6 +3096,26 @@ def init_db():
         connection.commit()
 
 
+def load_staff_roster():
+    if not STAFF_ROSTER_PATH.exists():
+        return []
+    try:
+        payload = json.loads(STAFF_ROSTER_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    roster = []
+    for entry in payload if isinstance(payload, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        email = str(entry.get("email", "")).strip().lower()
+        role = str(entry.get("role", "")).strip().lower()
+        phone = str(entry.get("phone", "")).strip()
+        if name and email and role and phone:
+            roster.append((name, email, role, phone))
+    return roster
+
+
 def seed_defaults(connection):
     users = [
         ("Budhub Helpdesk", "helpdesk@ecommerce.local", "helpdesk123", "helpdesk", ""),
@@ -3110,12 +3133,22 @@ def seed_defaults(connection):
         ("Test Customer 4", "test4@ecommerce.local", "test123", "client", ""),
         ("Test Customer 5", "test5@ecommerce.local", "test123", "client", ""),
     ]
+    users.extend(
+        (
+            name,
+            email,
+            re.sub(r"\D", "", phone or ""),
+            role,
+            phone,
+        )
+        for name, email, role, phone in load_staff_roster()
+    )
     for name, email, password, role, phone in users:
         existing = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
         if existing:
             connection.execute(
-                "UPDATE users SET verification_status = 'VERIFIED', account_state = CASE WHEN account_state = 'PENDING_VERIFICATION' THEN 'ACTIVE' ELSE account_state END, phone = CASE WHEN COALESCE(phone, '') = '' AND ? != '' THEN ? ELSE phone END WHERE id = ?",
-                (phone, phone, existing["id"]),
+                "UPDATE users SET name = CASE WHEN COALESCE(name, '') = '' THEN ? ELSE name END, role = CASE WHEN role = 'client' AND ? IN ('driver', 'picker', 'dispatcher', 'admin') THEN ? ELSE role END, verification_status = 'VERIFIED', account_state = CASE WHEN account_state = 'PENDING_VERIFICATION' THEN 'ACTIVE' ELSE account_state END, phone = CASE WHEN COALESCE(phone, '') = '' AND ? != '' THEN ? ELSE phone END WHERE id = ?",
+                (name, role, role, phone, phone, existing["id"]),
             )
             continue
         connection.execute(
@@ -3323,6 +3356,47 @@ def render_site_console_capture():
       });
     })();
   </script>
+    """
+
+
+def render_change_password_widget():
+    return """
+    <div class="modal-shell is-hidden" id="change-password-widget-modal">
+      <div class="modal-backdrop" data-close-change-password="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Account Security</span>
+            <h3>Change Password</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-change-password="yes">Close</button>
+        </div>
+        <form method="post" action="/account/change-password" class="form-grid">
+          <label>Current Password<input type="password" name="current_password" required></label>
+          <label>New Password<input type="password" name="new_password" minlength="6" required></label>
+          <label>Confirm New Password<input type="password" name="confirm_password" minlength="6" required></label>
+          <button type="submit">Update Password</button>
+        </form>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var openButton = document.getElementById('open-change-password-widget');
+        var modal = document.getElementById('change-password-widget-modal');
+        if (!openButton || !modal) {
+          return;
+        }
+        function closeModal() {
+          modal.classList.add('is-hidden');
+        }
+        openButton.addEventListener('click', function () {
+          modal.classList.remove('is-hidden');
+        });
+        modal.querySelectorAll('[data-close-change-password="yes"]').forEach(function (node) {
+          node.addEventListener('click', closeModal);
+        });
+      })();
+    </script>
     """
 
 
@@ -4130,9 +4204,9 @@ def dashboard_page(title, body, user=None, message=None, level="info", cart_coun
         verification_class = "is-verified" if verification_status == "VERIFIED" else "is-pending"
         verification_icon = '<span class="dashboard-verification-check">&#10003;</span>' if verification_status == "VERIFIED" else ""
         verification_badge = f'<span class="dashboard-verification-badge {verification_class}">{verification_icon}{html.escape(verification_status_label(verification_status))}</span>'
-    account_menu_actions = '<a class="dashboard-account-menu-link" href="/logout">Logout</a>'
+    account_menu_actions = '<button type="button" class="dashboard-account-menu-link" id="open-change-password-widget">Change Password</button><a class="dashboard-account-menu-link" href="/logout">Logout</a>'
     if user and user["role"] == "client":
-        account_menu_actions = '<button type="button" class="dashboard-account-menu-link" data-trigger-click="open-client-profile-widget">Edit Profile</button><a class="dashboard-account-menu-link" href="/logout">Logout</a>'
+        account_menu_actions = '<button type="button" class="dashboard-account-menu-link" data-trigger-click="open-client-profile-widget">Edit Profile</button><button type="button" class="dashboard-account-menu-link" id="open-change-password-widget">Change Password</button><a class="dashboard-account-menu-link" href="/logout">Logout</a>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -4196,6 +4270,7 @@ def dashboard_page(title, body, user=None, message=None, level="info", cart_coun
   {render_age_gate()}
   {render_payment_verified_widget(message)}
   {render_picker_packed_widget(message)}
+  {render_change_password_widget()}
   {extra_shell}
   {render_site_console_capture()}
   <script>
@@ -7365,20 +7440,32 @@ def driver_recently_returned(connection, driver_id, buffer_minutes=DRIVER_RETURN
     return (datetime.utcnow() - delivered_at) < timedelta(minutes=buffer_minutes)
 
 
-def auto_assignable_drivers(connection):
-    drivers = connection.execute(
-        "SELECT id, name FROM users WHERE role = 'driver' ORDER BY name, id"
-    ).fetchall()
-    if not drivers:
-        return []
-    clocked_in_ids = {
+def active_clocked_in_driver_ids(connection):
+    return {
         row["user_id"]
         for row in connection.execute(
-            "SELECT user_id FROM time_clock_entries WHERE clock_out_at IS NULL"
+            """
+            SELECT user_id
+            FROM time_clock_entries
+            WHERE clock_out_at IS NULL
+            """
         ).fetchall()
     }
-    if clocked_in_ids:
-        drivers = [driver for driver in drivers if driver["id"] in clocked_in_ids]
+
+
+def clocked_in_driver_rows(connection):
+    clocked_in_ids = active_clocked_in_driver_ids(connection)
+    if not clocked_in_ids:
+        return []
+    placeholders = ",".join("?" for _ in clocked_in_ids)
+    return connection.execute(
+        f"SELECT id, name FROM users WHERE role = 'driver' AND id IN ({placeholders}) ORDER BY name, id",
+        tuple(sorted(clocked_in_ids)),
+    ).fetchall()
+
+
+def auto_assignable_drivers(connection):
+    drivers = clocked_in_driver_rows(connection)
     if not drivers:
         return []
     active_counts = {
@@ -7415,6 +7502,8 @@ def submit_block_to_driver(connection, block_id, driver_id, dispatcher_id, autom
     block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
     driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (driver_id,)).fetchone()
     if not block or block["status"] != "OPEN" or not driver:
+        return False
+    if driver["id"] not in active_clocked_in_driver_ids(connection):
         return False
     if not automated and not override_multiple_blocks and driver_active_block_count(connection, driver["id"]) >= 1:
         return False
@@ -8895,7 +8984,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
     unresolved_addresses = unresolved_route_addresses(connection, [block["id"] for block in blocks])
     hub_coordinates = address_coordinate_row(connection, DISPATCH_HUB_ADDRESS)
     route_status = route_service_status()
-    drivers = connection.execute("SELECT id, name FROM users WHERE role = 'driver' ORDER BY name").fetchall()
+    drivers = clocked_in_driver_rows(connection)
     driver_options = "".join(f"<option value='{driver['id']}'>{html.escape(driver['name'])}</option>" for driver in drivers)
     open_blocks = [block for block in blocks if block["status"] == "OPEN"]
     block_options = "".join(f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>" for block in open_blocks)
@@ -9270,9 +9359,10 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
     pending_blocks = [block for block in open_blocks if int(block["active_ticket_count"] or 0) > 0]
     sent_blocks = [block for block in all_blocks if block["status"] == "SUBMITTED"]
     completed_blocks = [block for block in all_blocks if block["status"] == "CLOSED"]
+    clocked_in_drivers = clocked_in_driver_rows(connection)
     driver_options = "".join(
         f"<option value='{driver['id']}'>{html.escape(driver['name'])}</option>"
-        for driver in connection.execute("SELECT id, name FROM users WHERE role = 'driver' ORDER BY name").fetchall()
+        for driver in clocked_in_drivers
     )
 
     def render_picker_ready_dispatch_actions(ticket, index, include_note=False):
@@ -9313,6 +9403,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
               <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
               <button type="submit">Bypass Blocks and Queue Driver</button>
             </form>
+            {"<p class='subtle'>No drivers are currently clocked in. Manual direct-to-driver bypass is unavailable until a driver starts a shift.</p>" if not driver_options else ""}
           </div>
         </div>
         """
@@ -10248,6 +10339,28 @@ def handle_update_client_profile(environ, start_response, connection, user):
     return redirect(start_response, "/dashboard?message=Profile updated")
 
 
+def handle_change_password(environ, start_response, connection, user):
+    gate = require_user(start_response, user)
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    current_password = data.get("current_password", "")
+    new_password = data.get("new_password", "")
+    confirm_password = data.get("confirm_password", "")
+    if user["password_hash"] != hash_password(current_password):
+        return redirect(start_response, "/dashboard?message=Current password is incorrect")
+    if len(new_password) < 6:
+        return redirect(start_response, "/dashboard?message=New password must be at least 6 characters long")
+    if new_password != confirm_password:
+        return redirect(start_response, "/dashboard?message=New password confirmation does not match")
+    if current_password == new_password:
+        return redirect(start_response, "/dashboard?message=New password must be different from the current password")
+    connection.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(new_password), user["id"]))
+    log_activity(connection, user, "CHANGE_PASSWORD", "Updated account password.", target_user_id=user["id"])
+    connection.commit()
+    return redirect(start_response, "/dashboard?message=Password updated")
+
+
 def handle_create_product(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
@@ -11047,6 +11160,8 @@ def handle_update_order(environ, start_response, connection, user):
             driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            if driver["id"] not in active_clocked_in_driver_ids(connection):
+                return redirect(start_response, "/dashboard?message=That driver is not clocked in")
             prior_block_id = ticket["delivery_block_id"]
             update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], delivery_block_id=None, internal_note=f"Picker bypassed block and queued ticket to driver {driver['name']}.")
             refresh_delivery_block_status(connection, prior_block_id)
@@ -11057,6 +11172,8 @@ def handle_update_order(environ, start_response, connection, user):
             driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            if driver["id"] not in active_clocked_in_driver_ids(connection):
+                return redirect(start_response, "/dashboard?message=That driver is not clocked in")
             if driver_active_block_count(connection, driver["id"]) >= 1 and data.get("override_dispatch") != "1":
                 return redirect(start_response, "/dashboard?message=This driver already has an active block. Override is required to push another block.")
             if not submit_block_to_driver(connection, block_id, driver["id"], user["id"], automated=False, override_multiple_blocks=data.get("override_dispatch") == "1"):
@@ -11131,6 +11248,8 @@ def handle_update_order(environ, start_response, connection, user):
             driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            if driver["id"] not in active_clocked_in_driver_ids(connection):
+                return redirect(start_response, "/dashboard?message=That driver is not clocked in")
             prior_block_id = ticket["delivery_block_id"]
             update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], delivery_block_id=None, internal_note=f"Sent directly to driver {driver['name']}. Block: Dispatch block pending to bypass.")
             refresh_delivery_block_status(connection, prior_block_id)
@@ -11147,6 +11266,8 @@ def handle_update_order(environ, start_response, connection, user):
             driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            if driver["id"] not in active_clocked_in_driver_ids(connection):
+                return redirect(start_response, "/dashboard?message=That driver is not clocked in")
             if driver_active_block_count(connection, driver["id"]) >= 1 and data.get("override_dispatch") != "1":
                 return redirect(start_response, "/dashboard?message=This driver already has an active block. Override is required to push another block.")
             if not submit_block_to_driver(connection, block_id, driver["id"], user["id"], automated=False, override_multiple_blocks=data.get("override_dispatch") == "1"):
@@ -11674,6 +11795,8 @@ def application(environ, start_response):
             return text_response(start_response, render_dashboard(connection, user, message=message, open_ticket_id=params.get("open_ticket")))
         if path == "/account/profile-update" and method == "POST":
             return handle_update_client_profile(environ, start_response, connection, user)
+        if path == "/account/change-password" and method == "POST":
+            return handle_change_password(environ, start_response, connection, user)
         if path == "/help":
             gate = require_user(start_response, user)
             return gate or text_response(start_response, render_helpdesk_dashboard(connection, user, message=message))
