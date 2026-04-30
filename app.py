@@ -1,5 +1,6 @@
 import hashlib
 import html
+import hmac
 import json
 import mimetypes
 import math
@@ -71,7 +72,7 @@ SERVER_LOG_LOCK = Lock()
 SERVER_LOG_SEQUENCE = 0
 EMPLOYEE_ROLES = {"banker", "dispatcher", "picker", "driver"}
 ALLOWED_PRODUCT_IMAGE_HOSTS = {"images.leafly.com", "leafly-public.imgix.net"}
-PAYMENT_METHOD_OPTIONS = ["VENMO", "CHIME", "CASH_APP", "ZELLE", "APPLE_PAY", "GOOGLE_PAY", "CASH"]
+PAYMENT_METHOD_OPTIONS = ["VENMO", "CHIME", "CASH_APP", "ZELLE", "APPLE_PAY", "GOOGLE_PAY", "CASH", "TAP_TO_PAY"]
 PAYMENT_METHOD_LABELS = {
     "VENMO": "Venmo",
     "CHIME": "Chime",
@@ -80,6 +81,7 @@ PAYMENT_METHOD_LABELS = {
     "APPLE_PAY": "Apple Pay",
     "GOOGLE_PAY": "Google Pay",
     "CASH": "Cash",
+    "TAP_TO_PAY": "Tap to Pay",
 }
 ROUTE_PROVIDER_LABELS = {
     "BUDHUB_NATIVE": "BudHub Native",
@@ -106,6 +108,10 @@ TWILIO_API_KEY_SID = os.environ.get("TWILIO_API_KEY_SID", "").strip()
 TWILIO_API_KEY_SECRET = os.environ.get("TWILIO_API_KEY_SECRET", "").strip()
 TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "").strip()
 BUDHUB_PUBLIC_BASE_URL = (os.environ.get("BUDHUB_PUBLIC_BASE_URL", "").strip() or "").rstrip("/")
+CLOVER_MERCHANT_ID = os.environ.get("CLOVER_MERCHANT_ID", "").strip()
+CLOVER_PRIVATE_TOKEN = os.environ.get("CLOVER_PRIVATE_TOKEN", "").strip()
+CLOVER_WEBHOOK_SIGNING_SECRET = os.environ.get("CLOVER_WEBHOOK_SIGNING_SECRET", "").strip()
+CLOVER_API_BASE_URL = (os.environ.get("CLOVER_API_BASE_URL", "https://api.clover.com").strip() or "").rstrip("/")
 LOYALTY_POINTS_PER_DOLLAR = 1
 LOYALTY_POINTS_PER_DISCOUNT_DOLLAR = 20
 DELIVERY_ZONE_LABELS = {
@@ -150,6 +156,7 @@ DEFAULT_PAYMENT_DESTINATIONS = [
     ("ZELLE", "Zelle", "BudHub Zelle Desk", "", 1, 0),
     ("APPLE_PAY", "Apple Pay", "BudHub Apple Pay Desk", "", 1, 0),
     ("GOOGLE_PAY", "Google Pay", "BudHub Google Pay Desk", "", 1, 0),
+    ("TAP_TO_PAY", "Tap to Pay", "BudHub Tap to Pay", "Use a BudHub staff or driver card reader to accept a manual tap payment.", 1, 0),
     ("CASH", "Cash", "Pay in Person", "Bring cash for pickup orders or pay the driver directly at delivery.", 1, 1),
 ]
 BASE_DIR = Path(__file__).resolve().parent
@@ -266,6 +273,11 @@ POSTGRES_CREATE_STATEMENTS = [
         status TEXT NOT NULL,
         payment_status TEXT NOT NULL,
         payment_proof_path TEXT,
+        clover_checkout_session_id TEXT,
+        clover_checkout_url TEXT,
+        clover_checkout_status TEXT DEFAULT '',
+        clover_payment_id TEXT,
+        clover_last_event TEXT DEFAULT '',
         coupon_code TEXT,
         discount_amount REAL DEFAULT 0,
         loyalty_discount_amount REAL DEFAULT 0,
@@ -546,6 +558,13 @@ MENU_SECTION_NOTES = {
     "Flower": "Flower includes the Double Stuffed 7G lineup and any other whole flower options.",
 }
 LAUNCH_MENU = [
+    {
+        "name": "Ten Cent Test Item",
+        "category": "General",
+        "description": "Internal test menu item priced at ten cents.",
+        "price": 0.10,
+        "stock": 25,
+    },
     {
         "name": "Blue Dream Syrup 1000MG",
         "category": "Edibles",
@@ -2027,6 +2046,81 @@ def render_engineer_live_console_widget():
     """
 
 
+def clover_configured():
+    return bool(CLOVER_MERCHANT_ID and CLOVER_PRIVATE_TOKEN and CLOVER_API_BASE_URL)
+
+
+def clover_payment_method(ticket):
+    return (ticket["payment_method"] or "").upper() == "CLOVER_CARD"
+
+
+def clover_headers():
+    return {
+        "Authorization": f"Bearer {CLOVER_PRIVATE_TOKEN}",
+        "X-Clover-Merchant-Id": CLOVER_MERCHANT_ID,
+    }
+
+
+def clover_checkout_payload(environ, ticket):
+    customer_name = (ticket["contact_name"] or ticket["client_name"] or "").strip()
+    name_parts = customer_name.split(None, 1)
+    first_name = name_parts[0] if name_parts else "BudHub"
+    last_name = name_parts[1] if len(name_parts) > 1 else "Customer"
+    session_placeholder = "{CHECKOUT_SESSION_ID}"
+    success_url = f"{public_base_url(environ)}/payments/clover/return?ticket_id={ticket['id']}&result=success&session_id={quote(session_placeholder)}"
+    failure_url = f"{public_base_url(environ)}/payments/clover/return?ticket_id={ticket['id']}&result=failure&session_id={quote(session_placeholder)}"
+    amount_cents = max(1, int(round(float(ticket_due_amount(ticket)) * 100)))
+    return {
+        "customer": {
+            "email": ticket["client_email"] or "",
+            "firstName": first_name,
+            "lastName": last_name,
+            "phoneNumber": re.sub(r"\D", "", ticket["contact_phone"] or ""),
+        },
+        "redirectUrls": {
+            "success": success_url,
+            "failure": failure_url,
+        },
+        "shoppingCart": {
+            "lineItems": [
+                {
+                    "name": f"BudHub Ticket {ticket['ticket_number']}",
+                    "note": f"BudHub order payment for {ticket['fulfillment_type'].title()}",
+                    "price": amount_cents,
+                    "unitQty": 1,
+                }
+            ]
+        },
+    }
+
+
+def create_clover_checkout_session(environ, connection, ticket):
+    if not clover_configured():
+        raise ValueError("Clover Pay Now is not configured yet")
+    payload = clover_checkout_payload(environ, ticket)
+    response_payload = routing_json_request(
+        f"{CLOVER_API_BASE_URL}/invoicingcheckoutservice/v1/checkouts",
+        payload=payload,
+        headers=clover_headers(),
+        method="POST",
+        timeout=20,
+    )
+    href = (response_payload.get("href") or "").strip()
+    session_id = (response_payload.get("checkoutSessionId") or "").strip()
+    if not href or not session_id:
+        raise ValueError("Clover did not return a usable checkout session")
+    update_ticket(
+        connection,
+        ticket["id"],
+        clover_checkout_session_id=session_id,
+        clover_checkout_url=href,
+        clover_checkout_status="CREATED",
+        clover_last_event="Hosted checkout session created",
+        internal_note="Clover Pay Now session created.",
+    )
+    return href
+
+
 def render_payment_instructions(ticket):
     rows = []
     try:
@@ -2035,12 +2129,26 @@ def render_payment_instructions(ticket):
     except Exception:
         rows = []
     due_amount = format_money(ticket_due_amount(ticket))
-    if rows:
+    if clover_payment_method(ticket):
+        status_label = ticket["clover_checkout_status"] or "Not started"
+        webhook_note = (
+            "Webhook verification is enabled."
+            if CLOVER_WEBHOOK_SIGNING_SECRET
+            else "Webhook verification is not configured yet, so Clover success returns will stay pending until staff verification."
+        )
+        details = f"""
+        <div class='tracker-note'>
+          Clover Pay Now status: {html.escape(status_label)}. {html.escape(webhook_note)}
+        </div>
+        """
+    elif rows:
         destinations = "".join(
             f"<div class='item-pill'><strong>{html.escape(row['account_name'])}</strong><span>{html.escape(row['payment_link'] or row['display_name'])}</span></div>"
             for row in rows
         )
         details = f"<div class='item-pill-list'>{destinations}</div>"
+    elif (ticket["payment_method"] or "").upper() == "TAP_TO_PAY":
+        details = "<div class='tracker-note'>Tap to Pay is a manual in-person payment option. A BudHub staff member or driver must complete the card tap and verify the ticket payment afterward.</div>"
     else:
         details = "<div class='tracker-note'>No payment destination is configured for this method yet.</div>"
     return f"""
@@ -2762,6 +2870,11 @@ def init_db():
                 status TEXT NOT NULL,
                 payment_status TEXT NOT NULL,
                 payment_proof_path TEXT,
+                clover_checkout_session_id TEXT,
+                clover_checkout_url TEXT,
+                clover_checkout_status TEXT NOT NULL DEFAULT '',
+                clover_payment_id TEXT,
+                clover_last_event TEXT NOT NULL DEFAULT '',
                 coupon_code TEXT,
                 discount_amount REAL NOT NULL DEFAULT 0,
                 loyalty_discount_amount REAL NOT NULL DEFAULT 0,
@@ -3078,6 +3191,11 @@ def init_db():
         ensure_column(connection, "tickets", "loyalty_points_used INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "loyalty_points_awarded INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "payment_proof_path TEXT")
+        ensure_column(connection, "tickets", "clover_checkout_session_id TEXT")
+        ensure_column(connection, "tickets", "clover_checkout_url TEXT")
+        ensure_column(connection, "tickets", "clover_checkout_status TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "tickets", "clover_payment_id TEXT")
+        ensure_column(connection, "tickets", "clover_last_event TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "tickets", "delivery_block_id INTEGER")
         ensure_column(connection, "delivery_blocks", "route_provider TEXT NOT NULL DEFAULT 'BUDHUB_NATIVE'")
         ensure_column(connection, "delivery_blocks", "delivery_zone TEXT NOT NULL DEFAULT ''")
@@ -4702,6 +4820,10 @@ def render_payment_proof_widget(ticket):
     """
 
 
+def render_clover_pay_now_widget(ticket):
+    return ""
+
+
 def client_cart_count(connection, user_id):
     row = connection.execute("SELECT COALESCE(SUM(quantity), 0) AS count FROM cart_items WHERE user_id = ?", (user_id,)).fetchone()
     return row["count"] if row else 0
@@ -4727,6 +4849,7 @@ def ticket_rows(connection, where_clause="", params=()):
         f"""
         SELECT tickets.*,
                clients.name AS client_name,
+               clients.email AS client_email,
                banker.name AS banker_name,
                dispatcher.name AS dispatcher_name,
                picker.name AS picker_name,
@@ -8789,6 +8912,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         </div>
         {render_route_summary(ticket, route_stop, driver_location, customer_view=True, live_eta_minutes=live_eta_minutes)}
         {render_payment_instructions(ticket)}
+        {render_clover_pay_now_widget(ticket)}
         {render_payment_proof_widget(ticket)}
         {f"<div class='tracker-note'>Driver is on the way. Last location update: {html.escape(driver_location['created_at'])}</div>" if ticket['status'] == 'OUT_FOR_DELIVERY' and driver_location else ""}
         {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
@@ -9856,7 +9980,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
             <button type="submit" {'disabled' if not can_act_on_ticket else ''}>{button}</button>
           </form>
           {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_call_client'><button type='submit'>Call Client</button></form>" if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
-          {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_verify_payment'><button type='submit'>Verify Cash Payment</button></form>" if ticket['payment_status'] == 'PENDING' and ticket['payment_method'] == 'CASH' and ticket['fulfillment_type'] == 'DELIVERY' else ""}
+          {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_verify_payment'><button type='submit'>Verify Payment</button></form>" if ticket['payment_status'] == 'PENDING' and ticket['payment_method'] in {'CASH', 'TAP_TO_PAY'} and ticket['fulfillment_type'] == 'DELIVERY' else ""}
           {render_driver_emergency_widget(ticket, index)}
         </div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
@@ -10997,6 +11121,91 @@ def handle_order_chat(environ, start_response, connection, user):
     return redirect(start_response, f"/dashboard?message=Order message sent&open_ticket={ticket_id}")
 
 
+def clover_signature_valid(environ, raw_body):
+    if not CLOVER_WEBHOOK_SIGNING_SECRET:
+        return False
+    signature_header = (environ.get("HTTP_CLOVER_SIGNATURE") or "").strip()
+    if not signature_header:
+        return False
+    parts = {}
+    for chunk in signature_header.split(","):
+        if "=" in chunk:
+            key, value = chunk.split("=", 1)
+            parts[key.strip()] = value.strip()
+    timestamp = parts.get("t", "")
+    signature = parts.get("v1", "")
+    if not timestamp or not signature:
+        return False
+    signed_payload = timestamp.encode("utf-8") + b"." + raw_body
+    expected = hmac.new(CLOVER_WEBHOOK_SIGNING_SECRET.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def handle_clover_return(environ, start_response, connection):
+    params = query_params(environ)
+    ticket_id = int(params.get("ticket_id", "0") or 0)
+    result = (params.get("result", "") or "").strip().lower()
+    session_id = (params.get("session_id", "") or "").strip()
+    ticket = single_ticket(connection, ticket_id)
+    if not ticket:
+        return redirect(start_response, "/dashboard?message=Clover payment return could not find the ticket")
+    if result == "success":
+        update_ticket(
+            connection,
+            ticket_id,
+            clover_checkout_session_id=session_id or ticket["clover_checkout_session_id"],
+            clover_checkout_status="RETURNED_SUCCESS",
+            clover_last_event="Clover redirected back with a success result.",
+            internal_note="Clover checkout returned success. Awaiting webhook confirmation.",
+        )
+        connection.commit()
+        return redirect(start_response, f"/dashboard?message=Clover returned success. Waiting for payment confirmation&open_ticket={ticket_id}")
+    update_ticket(
+        connection,
+        ticket_id,
+        clover_checkout_session_id=session_id or ticket["clover_checkout_session_id"],
+        clover_checkout_status="RETURNED_FAILURE",
+        clover_last_event="Clover redirected back with a failure result.",
+        internal_note="Clover checkout returned failure.",
+    )
+    connection.commit()
+    return redirect(start_response, f"/dashboard?message=Clover payment was not completed&open_ticket={ticket_id}")
+
+
+def handle_clover_webhook(environ, start_response, connection):
+    try:
+        size = int(environ.get("CONTENT_LENGTH") or "0")
+    except ValueError:
+        size = 0
+    raw_body = environ["wsgi.input"].read(size)
+    if CLOVER_WEBHOOK_SIGNING_SECRET and not clover_signature_valid(environ, raw_body):
+        return json_response(start_response, {"ok": False, "error": "Invalid Clover signature"}, status="403 Forbidden")
+    try:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except (ValueError, json.JSONDecodeError):
+        return json_response(start_response, {"ok": False, "error": "Invalid payload"}, status="400 Bad Request")
+    session_id = str(payload.get("data", "") or "").strip()
+    if not session_id:
+        return json_response(start_response, {"ok": True})
+    ticket = connection.execute("SELECT * FROM tickets WHERE clover_checkout_session_id = ?", (session_id,)).fetchone()
+    if not ticket:
+        return json_response(start_response, {"ok": True})
+    status_value = str(payload.get("status", "") or "").strip().upper()
+    payment_id = str(payload.get("id", "") or "").strip()
+    event_message = str(payload.get("message", "") or "").strip() or f"Clover webhook status {status_value}"
+    update_fields = {
+        "clover_payment_id": payment_id,
+        "clover_last_event": event_message,
+        "clover_checkout_status": status_value or "WEBHOOK",
+        "internal_note": event_message,
+    }
+    if status_value == "APPROVED" and ticket["payment_status"] == "PENDING":
+        update_fields["payment_status"] = "VERIFIED"
+    update_ticket(connection, ticket["id"], **update_fields)
+    connection.commit()
+    return json_response(start_response, {"ok": True})
+
+
 def handle_driver_location(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"driver"})
     if gate:
@@ -11136,6 +11345,20 @@ def handle_update_order(environ, start_response, connection, user):
     if user["role"] == "client":
         if ticket["client_id"] != user["id"]:
             return redirect(start_response, "/dashboard?message=That order is not yours")
+        if action == "start_clover_checkout":
+            if not clover_payment_method(ticket):
+                return redirect(start_response, f"/dashboard?message=This ticket is not using Clover Pay Now&open_ticket={ticket_id}")
+            if ticket["payment_status"] == "VERIFIED":
+                return redirect(start_response, f"/dashboard?message=This ticket is already paid&open_ticket={ticket_id}")
+            if ticket["status"] in {"DELIVERED", "CANCELED"}:
+                return redirect(start_response, f"/dashboard?message=This ticket can no longer be paid online&open_ticket={ticket_id}")
+            try:
+                checkout_url = create_clover_checkout_session(environ, connection, ticket)
+            except (ValueError, RoutePlanningError) as exc:
+                connection.commit()
+                return redirect(start_response, f"/dashboard?message={quote(str(exc))}&open_ticket={ticket_id}")
+            connection.commit()
+            return redirect(start_response, checkout_url)
         if action == "upload_payment_proof":
             if ticket["status"] in {"DELIVERED", "CANCELED"}:
                 return redirect(start_response, f"/dashboard?message=Payment proof uploads are closed for this order&open_ticket={ticket_id}")
@@ -11410,9 +11633,10 @@ def handle_update_order(environ, start_response, connection, user):
             log_activity(connection, user, "DRIVER_CALL_CLIENT", f"Started a masked call for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Calling client through BudHub relay")
-        if action == "driver_verify_payment" and ticket["payment_status"] == "PENDING" and ticket["payment_method"] == "CASH" and ticket["fulfillment_type"] == "DELIVERY" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
-            update_ticket(connection, ticket_id, payment_status="VERIFIED", driver_id=user["id"], internal_note="Cash delivery payment verified by driver.")
-            log_activity(connection, user, "DRIVER_VERIFY_PAYMENT", f"Verified cash delivery payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+        if action == "driver_verify_payment" and ticket["payment_status"] == "PENDING" and ticket["payment_method"] in {"CASH", "TAP_TO_PAY"} and ticket["fulfillment_type"] == "DELIVERY" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
+            payment_label = payment_method_label(ticket["payment_method"])
+            update_ticket(connection, ticket_id, payment_status="VERIFIED", driver_id=user["id"], internal_note=f"{payment_label} delivery payment verified by driver.")
+            log_activity(connection, user, "DRIVER_VERIFY_PAYMENT", f"Verified {payment_label.lower()} delivery payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Payment verified")
         if action == "driver_emergency":
@@ -11847,6 +12071,10 @@ def application(environ, start_response):
             return handle_browser_console_log(environ, start_response, user)
         if path == "/engineer/console-events" and method == "GET":
             return serve_engineer_console_events(environ, start_response, user)
+        if path == "/payments/clover/return" and method == "GET":
+            return handle_clover_return(environ, start_response, connection)
+        if path == "/payments/clover/webhook" and method == "POST":
+            return handle_clover_webhook(environ, start_response, connection)
         if path == "/twilio/voice/incoming" and method in {"GET", "POST"}:
             return handle_twilio_incoming_call(environ, start_response, connection)
         if path == "/twilio/voice/driver-bridge" and method in {"GET", "POST"}:
