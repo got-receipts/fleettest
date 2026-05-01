@@ -11436,12 +11436,15 @@ def handle_update_order(environ, start_response, connection, user):
                 auto_process_dispatch_queue(connection, fallback_dispatcher_id=user["id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Packed and returned to dispatch")
-        if action == "send_review" and ticket["status"] == "PACKING":
+        if action == "send_review" and ticket["status"] not in {"CANCELED", "DELIVERED", "DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
             reason = data.get("reason", "").strip()
             if not reason:
                 return redirect(start_response, "/dashboard?message=Review reason is required")
             release_ticket_stock(connection, ticket_id)
-            update_ticket(connection, ticket_id, status="REVIEW_REQUIRED", picker_id=user["id"], review_reason=reason, driver_id=None)
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="REVIEW_REQUIRED", picker_id=user["id"], review_reason=reason, driver_id=None, delivery_block_id=None, dispatcher_id=None, internal_note="Returned to customer for item changes.")
+            refresh_delivery_block_status(connection, prior_block_id)
+            log_activity(connection, user, "SEND_REVIEW", f"Returned ticket #{ticket['ticket_number']} to the customer for changes.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket returned to the customer for item changes")
         if action == "create_block_for_ticket" and ticket["status"] == "READY_FOR_DISPATCH":
