@@ -555,8 +555,62 @@ STRAIN_FILTER_OPTIONS = ["All", "Sativa", "Indica", "Hybrid", "Unspecified"]
 MENU_SECTION_NOTES = {
     "Edibles": "Flavor options are listed in the product details when available.",
     "Concentrates": "Concentrate options are listed by jar size.",
-    "Flower": "Flower includes the Double Stuffed 7G lineup and any other whole flower options.",
+    "Flower": "Flower shows the current BudHub flower lineup and price tiers.",
 }
+FLOWER_LAUNCH_SPECS = [
+    ("White fire", 15.50, 10, "Pipe Dream", "https://www.leafly.com/strains/pipe-dream"),
+    ("Mendo berries", 15.50, 10, "Wicked Glue", "https://www.leafly.com/strains/wicked-glue"),
+    ("Sunset sherbet", 15.50, 10, "Passion Fruit", "https://www.leafly.com/strains/passion-fruit"),
+    ("Frozen grape", 15.50, 10, "Jokerz", "https://www.leafly.com/strains/jokerz"),
+    ("Cherry crushers", 15.50, 10, "Juicy Lucy", "https://www.leafly.com/strains/juicy-lucy"),
+    ("Black magic", 15.50, 10, "White Cheese", "https://www.leafly.com/strains/white-cheese"),
+    ("Blue skittles", 22.50, 10, "Turbo", "https://www.leafly.com/strains/turbo"),
+    ("Wedding crash out", 22.50, 10, "Huckleberry Desstar", "https://www.leafly.com/strains/huckleberry-desstar"),
+    ("Ice Cream Runt", 25.50, 10, "Strawberry Sherbet", "https://www.leafly.com/strains/strawberry-sherbet"),
+    ("Biscotti Cream", 25.50, 10, "Alpha One", "https://www.leafly.com/strains/alpha-one"),
+    ("Gary Payton", 25.50, 10, "Space Cake", "https://www.leafly.com/strains/space-cake"),
+    ("London Pound Cake", 25.50, 10, "Cherry Chem", "https://www.leafly.com/strains/cherry-chem"),
+    ("Slurricane", 25.50, 10, "Orange Tree", "https://www.leafly.com/strains/orange-tree"),
+    ("Do-Si-Dos", 25.50, 10, "Grape Triangle", "https://www.leafly.com/strains/grape-triangle"),
+    ("Sunset Runts", 25.50, 10, "Dead Ass Spock B", "https://www.leafly.com/strains/dead-ass-spock-b"),
+    ("Grape Ape", 25.50, 10, "Papa Don", "https://www.leafly.com/strains/papa-don"),
+    ("Blueberry Muffin", 25.50, 10, "Garanimals", "https://www.leafly.com/strains/garanimals"),
+    ("Frozen piss", 30.50, 10, "Sour Cream", "https://www.leafly.com/strains/sour-cream"),
+    ("Maui Wowie", 30.50, 10, "Cherry Treat", "https://www.leafly.com/strains/cherry-treat"),
+    ("Pineapple Express", 30.50, 10, "Santas Cookies", "https://www.leafly.com/strains/santas-cookies"),
+    ("White Widow", 30.50, 10, "Voyager 1", "https://www.leafly.com/strains/voyager-1"),
+    ("Durban Poison", 30.50, 10, "Crescendo", "https://www.leafly.com/strains/crescendo"),
+    ("Jack Herer", 30.50, 10, "Gdp Haze X Peach Ringz", "https://www.leafly.com/strains/gdp-haze-x-peach-ringz"),
+    ("Super Lemon Haze", 30.50, 10, "Tahoe Hydro Champagne", "https://www.leafly.com/strains/tahoe-hydro-champagne"),
+    ("Amnesia Haze", 30.50, 10, "Easy Peezy", "https://www.leafly.com/strains/easy-peezy"),
+    ("Trainwreck", 30.50, 10, "Orange Pound Cake", "https://www.leafly.com/strains/orange-pound-cake"),
+    ("Green Crack", 30.50, 10, "Coconut Cream", "https://www.leafly.com/strains/coconut-cream"),
+    ("Pink nerds", 30.50, 10, "Face Slapper", "https://www.leafly.com/strains/face-slapper"),
+    ("candy float", 35.50, 10, "Purple Tonic", "https://www.leafly.com/strains/purple-tonic"),
+    ("cinnamon roll runts", 35.50, 10, "Pineapple Gelato", "https://www.leafly.com/strains/pineapple-gelato"),
+    ("coochie runts", 35.50, 10, "Fruity Juice", "https://www.leafly.com/strains/fruity-juice"),
+    ("dulce delight", 35.50, 10, "Odo", "https://www.leafly.com/strains/odo"),
+    ("Pineapple sundae", 35.50, 10, "Igloo", "https://www.leafly.com/strains/igloo"),
+    ("Rage Bait", 40.50, 10, "Fruit Loot", "https://www.leafly.com/strains/fruit-loot"),
+    ("Gladiator Kush (1 left)", 40.50, 1, "Cookie Jar", "https://www.leafly.com/strains/cookie-jar"),
+    ("Sour Milk", 40.50, 10, "Big Ripper", "https://www.leafly.com/strains/big-ripper"),
+    ("blue sushi", 50.50, 10, "Sharks Breath", "https://www.leafly.com/strains/sharks-breath"),
+    ("pink sushi", 50.50, 10, "Blue Sharkz", "https://www.leafly.com/strains/blue-sharkz"),
+    ("Galaxy gas", 60.50, 10, "Kaleidos Dope", "https://www.leafly.com/strains/kaleidos-dope"),
+    ("Rocket fuel", 60.50, 10, "Battery Stick", "https://www.leafly.com/strains/battery-stick"),
+]
+FLOWER_LAUNCH_MENU = [
+    {
+        "name": name,
+        "category": "Flower",
+        "description": f"Flower menu option priced at ${price:.2f}.",
+        "price": price,
+        "stock": stock,
+        "leafly_strain_name": leafly_name,
+        "source_url": source_url,
+    }
+    for name, price, stock, leafly_name, source_url in FLOWER_LAUNCH_SPECS
+]
 LAUNCH_MENU = [
     {
         "name": "Ten Cent Test Item",
@@ -586,260 +640,7 @@ LAUNCH_MENU = [
         "price": 70.50,
         "stock": 10,
     },
-    {
-        "name": "Blue Dream OZ",
-        "category": "Flower",
-        "description": "Full ounce flower option.",
-        "price": 100.50,
-        "stock": 8,
-    },
-    {
-        "name": "Blue Dream DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $15.50.",
-        "price": 15.50,
-        "stock": 14,
-    },
-    {
-        "name": "Blue Dream Reserve DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $15.50.",
-        "price": 15.50,
-        "stock": 10,
-    },
-    {
-        "name": "Gelato DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $15.50.",
-        "price": 15.50,
-        "stock": 10,
-    },
-    {
-        "name": "Mimosa Smalls DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $17.50.",
-        "price": 17.50,
-        "stock": 10,
-    },
-    {
-        "name": "White Widow Smalls DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $17.50.",
-        "price": 17.50,
-        "stock": 10,
-    },
-    {
-        "name": "LA Confidential DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-        "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-5.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/la-confidential",
-    },
-    {
-        "name": "Wedding Cake DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Sour Candy DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-        "image_url": "https://leafly-public.imgix.net/strains/photos/5SPDG4T4TcSO8PgLgWHO_SourDiesel_AdobeStock_171888473.jpg?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/sour-diesel",
-    },
-    {
-        "name": "Mimosa DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Biscotti DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Ice Cream Cake DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Gelato Reserve DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Jack Herer DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Gelatti Reserve DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
-        "price": 25.50,
-        "stock": 10,
-    },
-    {
-        "name": "Afghan Kush DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $30.50. Low stock batch.",
-        "price": 30.50,
-        "stock": 4,
-        "image_url": "https://images.leafly.com/flower-images/defaults/long-fluffy-wispy/strain-7.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/afghan-kush",
-    },
-    {
-        "name": "Sundae Driver DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $30.50.",
-        "price": 30.50,
-        "stock": 8,
-        "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-17.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/sundae-driver",
-    },
-    {
-        "name": "Northern Lights DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $30.50.",
-        "price": 30.50,
-        "stock": 8,
-    },
-    {
-        "name": "Animal Mints DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $30.50.",
-        "price": 30.50,
-        "stock": 8,
-        "image_url": "https://leafly-public.imgix.net/strains/photos/IaYQshrPTxiD2BOWHO1n_AnimalMints.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/animal-mints",
-    },
-    {
-        "name": "White Widow DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $30.50.",
-        "price": 30.50,
-        "stock": 8,
-    },
-    {
-        "name": "GMO Cookies Reserve DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-    },
-    {
-        "name": "Mimosa DS 7G Reserve",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-    },
-    {
-        "name": "Pineapple Express DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-        "image_url": "https://images.leafly.com/flower-images/pineapple-express.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/pineapple-express",
-    },
-    {
-        "name": "OG Kush DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-    },
-    {
-        "name": "Purple Haze DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-        "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-10.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/purple-haze",
-    },
-    {
-        "name": "Durban Poison DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50. Low stock batch.",
-        "price": 35.50,
-        "stock": 4,
-    },
-    {
-        "name": "Biscotti DS 7G Reserve",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-    },
-    {
-        "name": "OG Kush Platinum DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
-        "price": 35.50,
-        "stock": 8,
-    },
-    {
-        "name": "Gelatti DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
-        "price": 40.50,
-        "stock": 6,
-    },
-    {
-        "name": "Wedding Cake DS 7G Reserve",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
-        "price": 40.50,
-        "stock": 6,
-    },
-    {
-        "name": "GMO Cookies DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
-        "price": 40.50,
-        "stock": 6,
-    },
-    {
-        "name": "Ice Cream Cake DS 7G Reserve",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
-        "price": 40.50,
-        "stock": 6,
-    },
-    {
-        "name": "Super Sour Diesel DS 7G",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $50.50.",
-        "price": 50.50,
-        "stock": 5,
-        "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-22.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill",
-        "source_url": "https://www.leafly.com/strains/super-sour-diesel",
-    },
-    {
-        "name": "OG Kush DS 7G Reserve",
-        "category": "Flower",
-        "description": "Double Stuffed 7G flower. Tier priced at $50.50.",
-        "price": 50.50,
-        "stock": 5,
-    },
+    *FLOWER_LAUNCH_MENU,
 ]
 
 ROLE_LABELS = {
@@ -2686,8 +2487,25 @@ def ensure_column(connection, table_name, definition):
 
 
 def sync_launch_menu(connection):
+    flower_launch_names = {item["name"] for item in FLOWER_LAUNCH_MENU}
+    connection.execute(
+        f"""
+        DELETE FROM products
+        WHERE category = 'Flower'
+          AND name NOT IN ({",".join("?" for _ in flower_launch_names)})
+        """,
+        tuple(sorted(flower_launch_names)),
+    )
     for item in LAUNCH_MENU:
-        leafly_reference = infer_leafly_reference(connection, item["name"])
+        leafly_reference = None
+        explicit_leafly_name = (item.get("leafly_strain_name") or "").strip()
+        if explicit_leafly_name:
+            leafly_reference = connection.execute(
+                "SELECT * FROM leafly_strains WHERE lower(name) = lower(?)",
+                (explicit_leafly_name,),
+            ).fetchone()
+        if not leafly_reference:
+            leafly_reference = infer_leafly_reference(connection, item["name"])
         menu_group, strain_type = infer_product_metadata(item["name"], item["category"], item["description"])
         if leafly_reference:
             item.setdefault("source_url", leafly_reference["source_url"])
@@ -2707,7 +2525,7 @@ def sync_launch_menu(connection):
                     item["description"],
                     item.get("image_url"),
                     item.get("source_url"),
-                    leafly_reference["name"] if leafly_reference else None,
+                    leafly_reference["name"] if leafly_reference else explicit_leafly_name or None,
                     item["price"],
                     item["stock"],
                     menu_group,
@@ -2727,7 +2545,7 @@ def sync_launch_menu(connection):
                     item["description"],
                     item.get("image_url"),
                     item.get("source_url"),
-                    leafly_reference["name"] if leafly_reference else None,
+                    leafly_reference["name"] if leafly_reference else explicit_leafly_name or None,
                     item["price"],
                     item["stock"],
                     menu_group,
@@ -8058,11 +7876,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
                 WHEN 'Concentrates' THEN 3
                 ELSE 5
             END,
-            CASE
-                WHEN category = 'Flower' AND (name LIKE '%DS 7G%' OR description LIKE '%Double Stuffed%') THEN 0
-                WHEN category = 'Flower' THEN 1
-                ELSE 0
-            END,
             price ASC,
             name COLLATE NOCASE ASC
         """
@@ -8099,8 +7912,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         elif user:
             action = "<a class='button ghost' href='/dashboard'>Open Dashboard</a>"
         card_label = product["category"]
-        if product["category"] == "Flower" and is_double_stuffed_product(product):
-            card_label = "Flower | Double Stuffed 7G"
         product_image = product_image_proxy_url(product['image_url'], product['source_url'] or '')
         product_is_new = "true" if is_new_product(product) else "false"
         product_is_deal = "true" if is_deal_product(product) else "false"
@@ -8484,11 +8295,6 @@ def render_menu_page(connection, user=None, message=None, level="info", filters=
                 WHEN 'Concentrates' THEN 3
                 ELSE 5
             END,
-            CASE
-                WHEN category = 'Flower' AND (name LIKE '%DS 7G%' OR description LIKE '%Double Stuffed%') THEN 0
-                WHEN category = 'Flower' THEN 1
-                ELSE 0
-            END,
             price ASC,
             name COLLATE NOCASE ASC
         """
@@ -8525,8 +8331,6 @@ def render_menu_page(connection, user=None, message=None, level="info", filters=
         elif user:
             action = "<a class='button ghost' href='/dashboard'>Open Dashboard</a>"
         card_label = product["category"]
-        if product["category"] == "Flower" and is_double_stuffed_product(product):
-            card_label = "Flower | Double Stuffed 7G"
         product_image = product_image_proxy_url(product['image_url'], product['source_url'] or '')
         product_is_new = "true" if is_new_product(product) else "false"
         product_is_deal = "true" if is_deal_product(product) else "false"
