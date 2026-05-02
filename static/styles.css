@@ -1942,6 +1942,23 @@ tbody tr:hover {
   cursor: pointer;
 }
 
+.file-drop-copy {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+}
+
+.file-drop-preview {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 260px);
+  max-height: 180px;
+  object-fit: cover;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
+}
+
 .payment-proof-panel {
   display: grid;
   gap: 0.9rem;

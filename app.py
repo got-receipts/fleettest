@@ -3213,6 +3213,8 @@ def seed_defaults(connection):
         ("Test Customer 3", "test3@ecommerce.local", "test123", "client", ""),
         ("Test Customer 4", "test4@ecommerce.local", "test123", "client", ""),
         ("Test Customer 5", "test5@ecommerce.local", "test123", "client", ""),
+        ("Alexis Casela", "caselaa14@gmail.com", "caselaa14@gmail.com", "client", ""),
+        ("Kaytee", "ketorah9@gmail.com", "ketorah9@gmail.com", "client", ""),
     ]
     users.extend(
         (
@@ -4688,9 +4690,27 @@ def register_form(error=""):
             <label>Email<input type="email" name="email" required></label>
             <label>Phone Number<input type="tel" name="phone" required></label>
             <label>Password<input type="password" name="password" minlength="6" required></label>
-            <label class="file-drop-label">ID Front Photo<span class="file-drop-zone">Drop or select ID front<input type="file" name="id_front" accept="image/*" required></span></label>
-        <label class="file-drop-label">ID Back Photo<span class="file-drop-zone">Drop or select ID back<input type="file" name="id_back" accept="image/*" required></span></label>
-        <label class="file-drop-label">Selfie Holding ID<span class="file-drop-zone">Drop or select selfie<input type="file" name="id_selfie" accept="image/*" required></span></label>
+            <label class="file-drop-label">ID Front Photo
+              <span class="file-drop-zone" data-upload-preview-shell="id-front">
+                <input type="file" name="id_front" accept="image/*" required data-upload-preview-input="id-front">
+                <span class="file-drop-copy" data-upload-preview-copy="id-front">Drop or select ID front</span>
+                <img class="file-drop-preview is-hidden" alt="ID front preview" data-upload-preview-image="id-front">
+              </span>
+            </label>
+            <label class="file-drop-label">ID Back Photo
+              <span class="file-drop-zone" data-upload-preview-shell="id-back">
+                <input type="file" name="id_back" accept="image/*" required data-upload-preview-input="id-back">
+                <span class="file-drop-copy" data-upload-preview-copy="id-back">Drop or select ID back</span>
+                <img class="file-drop-preview is-hidden" alt="ID back preview" data-upload-preview-image="id-back">
+              </span>
+            </label>
+            <label class="file-drop-label">Selfie Holding ID
+              <span class="file-drop-zone" data-upload-preview-shell="id-selfie">
+                <input type="file" name="id_selfie" accept="image/*" required data-upload-preview-input="id-selfie">
+                <span class="file-drop-copy" data-upload-preview-copy="id-selfie">Drop or select selfie</span>
+                <img class="file-drop-preview is-hidden" alt="Selfie with ID preview" data-upload-preview-image="id-selfie">
+              </span>
+            </label>
         <button type="submit">Create Account</button>
       </form>
       <div class="login-support-row" id="support-access">
@@ -4732,6 +4752,31 @@ def register_form(error=""):
           }});
           modal.querySelectorAll('[data-close-register-help="yes"]').forEach(function (node) {{
             node.addEventListener('click', closeModal);
+          }});
+          ['id-front', 'id-back', 'id-selfie'].forEach(function (key) {{
+            var input = document.querySelector('[data-upload-preview-input="' + key + '"]');
+            var copy = document.querySelector('[data-upload-preview-copy="' + key + '"]');
+            var image = document.querySelector('[data-upload-preview-image="' + key + '"]');
+            if (!input || !copy || !image) {{
+              return;
+            }}
+            input.addEventListener('change', function () {{
+              var file = input.files && input.files[0];
+              if (!file) {{
+                copy.textContent = 'Drop or select file';
+                image.classList.add('is-hidden');
+                image.removeAttribute('src');
+                return;
+              }}
+              copy.textContent = file.name;
+              if (file.type && file.type.indexOf('image/') === 0) {{
+                image.src = URL.createObjectURL(file);
+                image.classList.remove('is-hidden');
+              }} else {{
+                image.classList.add('is-hidden');
+                image.removeAttribute('src');
+              }}
+            }});
           }});
         }})();
       </script>
