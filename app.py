@@ -9611,6 +9611,8 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
     tickets = live_tickets + processed_tickets + archived_delivery_tickets
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    route_stop_map = ticket_route_stop_map(connection, [ticket["id"] for ticket in tickets])
+    driver_location_map = latest_driver_locations_map(connection, [ticket["id"] for ticket in tickets])
     all_blocks = delivery_block_rows(connection)
     open_blocks = [block for block in all_blocks if block["status"] == "OPEN"]
     pending_blocks = [block for block in open_blocks if int(block["active_ticket_count"] or 0) > 0]
@@ -9666,6 +9668,10 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
         """
 
     def render_picker_history_modal(ticket, modal_id, eyebrow):
+        route_stop = route_stop_map.get(ticket["id"])
+        driver_location = driver_location_map.get(ticket["id"])
+        live_eta_minutes = live_eta_for_ticket(ticket, driver_location) if driver_location else None
+        tracking_panel_id = f"{modal_id}-tracking"
         maps_link = google_maps_link(ticket["shipping_address"])
         maps_embed = google_maps_embed_link(ticket["shipping_address"])
         detail_html = f"""
@@ -9681,6 +9687,8 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           {render_payment_status_badge(ticket["payment_status"])}
         </div>
         {render_payment_instructions(ticket)}
+        {render_route_summary(ticket, route_stop, driver_location, live_eta_minutes=live_eta_minutes)}
+        {render_tracking_popup(tracking_panel_id, driver_location, live_eta_minutes, ticket["shipping_address"]) if ticket['status'] == 'OUT_FOR_DELIVERY' else ""}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket['id'], []))}
         {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
