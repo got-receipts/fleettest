@@ -2133,7 +2133,7 @@ def lab_analysis_payload(connection, product_id, allow_remote_fetch=False):
         return None
     strain = product_leafly_strain(connection, product)
     source_url = product["source_url"] or (strain["source_url"] if strain else "")
-    strain_name = product["leafly_strain_name"] or (strain["name"] if strain else product["name"])
+    strain_name = product["name"]
     strain_type = product["strain_type"] or (strain["strain_type"] if strain else "Unspecified")
     thc_percent = (strain["thc_percent"] if strain else "") or ""
     if allow_remote_fetch and source_url and not thc_percent:
@@ -3499,7 +3499,7 @@ def render_budtender_widget():
 def render_lab_analysis_button(product, product_strain):
     if not product["source_url"] and not product["leafly_strain_name"]:
         return ""
-    strain_name = product["leafly_strain_name"] or product["name"]
+    strain_name = product["name"]
     return (
         f'<button type="button" class="source-link lab-analysis-trigger" '
         f'data-open-lab-analysis="yes" '
