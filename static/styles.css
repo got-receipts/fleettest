@@ -46,6 +46,8 @@ a {
   place-items: center;
   padding: 1.25rem;
   isolation: isolate;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .modal-shell:not(.is-hidden) {
@@ -65,9 +67,12 @@ a {
   z-index: 2;
   width: min(100%, 640px);
   max-height: calc(100vh - 2.5rem);
-  overflow: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  -ms-overflow-style: auto;
   padding: 1.35rem 1.4rem;
   border-radius: 24px;
   border: 1px solid var(--line);
@@ -79,7 +84,16 @@ a {
 }
 
 .modal-card::-webkit-scrollbar {
-  display: none;
+  width: 10px;
+}
+
+.modal-card::-webkit-scrollbar-thumb {
+  background: rgba(160, 245, 164, 0.28);
+  border-radius: 999px;
+}
+
+.modal-card::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .login-support-row {
@@ -3815,6 +3829,15 @@ tbody tr:hover {
 @media (max-width: 640px) {
   .modal-shell {
     padding: 0.65rem;
+    place-items: start center;
+    align-content: start;
+  }
+
+  .modal-card {
+    width: min(100%, calc(100vw - 1.3rem));
+    max-height: calc(100vh - 1.3rem);
+    margin: 0 auto;
+    border-radius: 22px;
   }
 
   .order-chat-modal {

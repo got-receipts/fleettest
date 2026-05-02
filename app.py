@@ -1518,6 +1518,66 @@ def leafly_strain_rows(connection):
     return connection.execute("SELECT * FROM leafly_strains ORDER BY name COLLATE NOCASE ASC").fetchall()
 
 
+def leafly_search_tokens(value):
+    return [token for token in re.split(r"[^a-z0-9]+", str(value or "").lower()) if len(token) >= 2]
+
+
+def search_leafly_references(connection, query, category, limit=40):
+    normalized_category = (category or "").strip().title()
+    if normalized_category not in {"Flower", "Concentrates"}:
+        return []
+    query = (query or "").strip()
+    tokens = leafly_search_tokens(query)
+    if not tokens:
+        return connection.execute(
+            """
+            SELECT id, name, strain_type, thc_percent
+            FROM leafly_strains
+            ORDER BY
+                CASE strain_type
+                    WHEN 'Hybrid' THEN 0
+                    WHEN 'Indica' THEN 1
+                    WHEN 'Sativa' THEN 2
+                    ELSE 3
+                END,
+                name COLLATE NOCASE ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    clauses = []
+    params = []
+    for token in tokens:
+        clauses.append("lower(name) LIKE ?")
+        params.append(f"%{token}%")
+    candidates = connection.execute(
+        f"""
+        SELECT id, name, strain_type, thc_percent
+        FROM leafly_strains
+        WHERE {" OR ".join(clauses)}
+        LIMIT ?
+        """,
+        tuple(params) + (max(limit * 5, 120),),
+    ).fetchall()
+    ranked = []
+    lowered_query = query.lower()
+    for row in candidates:
+        lowered_name = (row["name"] or "").lower()
+        score = 0
+        if lowered_name == lowered_query:
+            score += 100
+        if lowered_name.startswith(lowered_query):
+            score += 45
+        for token in tokens:
+            if lowered_name.startswith(token):
+                score += 18
+            if token in lowered_name:
+                score += 10
+        ranked.append((score, lowered_name, row))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in ranked[:limit]]
+
+
 def infer_leafly_reference(connection, product_name):
     cleaned = (
         product_name.replace(" DS 7G", "")
@@ -2488,6 +2548,10 @@ def ensure_column(connection, table_name, definition):
 
 def sync_launch_menu(connection):
     flower_launch_names = {item["name"] for item in FLOWER_LAUNCH_MENU}
+    deleted_seed_names = {
+        row["name"].lower()
+        for row in connection.execute("SELECT name FROM deleted_seed_products").fetchall()
+    }
     connection.execute(
         f"""
         DELETE FROM products
@@ -2497,6 +2561,8 @@ def sync_launch_menu(connection):
         tuple(sorted(flower_launch_names)),
     )
     for item in LAUNCH_MENU:
+        if item["name"].lower() in deleted_seed_names:
+            continue
         leafly_reference = None
         explicit_leafly_name = (item.get("leafly_strain_name") or "").strip()
         if explicit_leafly_name:
@@ -2957,6 +3023,11 @@ def init_db():
                 FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
                 FOREIGN KEY (driver_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (client_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS deleted_seed_products (
+                name TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL
             );
             """
         )
@@ -6095,9 +6166,9 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
           <button type="button" class="button ghost modal-close" data-close-create-product-widget="yes">Close</button>
         </div>
         <form method="post" action="/products/create" class="form-grid">
-          <label>Name<input type="text" name="name" required></label>
+          <label>Name<input type="text" name="name" required data-leafly-product-name="yes"></label>
           <label>Category
-            <select name="category">
+            <select name="category" data-leafly-category="yes">
               <option value="Edibles">Edibles</option>
               <option value="Concentrates">Concentrates</option>
               <option value="Flower">Flower</option>
@@ -6114,10 +6185,10 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
             </select>
           </label>
           <label>Leafly Strain
-            <select name="leafly_strain_id">
+            <select name="leafly_strain_id" data-leafly-select="yes">
               <option value="">Choose strain catalog reference</option>
-              {''.join(f"<option value='{strain['id']}'>{html.escape(strain['name'])} ({html.escape(strain['strain_type'])} | THC {html.escape(strain['thc_percent'] or 'pending')})</option>" for strain in leafly_strains)}
             </select>
+            <small class="subtle" data-leafly-hint="yes">Start typing a flower or concentrate product name to load relevant strain references first.</small>
           </label>
           <label>Price<input type="number" name="price" min="0.01" step="0.01" required></label>
           <label>Stock<input type="number" name="stock" min="0" required></label>
@@ -6199,6 +6270,87 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
             node.addEventListener('click', closeModal);
           }});
         }});
+        var productModal = document.getElementById('create-product-widget-modal');
+        if (!productModal) {{
+          return;
+        }}
+        var nameInput = productModal.querySelector('[data-leafly-product-name="yes"]');
+        var categorySelect = productModal.querySelector('[data-leafly-category="yes"]');
+        var strainSelect = productModal.querySelector('[data-leafly-select="yes"]');
+        var hintNode = productModal.querySelector('[data-leafly-hint="yes"]');
+        if (!nameInput || !categorySelect || !strainSelect || !hintNode) {{
+          return;
+        }}
+        var searchTimer = null;
+        var requestCounter = 0;
+        var currentSelection = '';
+
+        function renderChoices(items) {{
+          var placeholder = document.createElement('option');
+          placeholder.value = '';
+          placeholder.textContent = items.length ? 'Choose strain catalog reference' : 'No matching strain references found';
+          strainSelect.innerHTML = '';
+          strainSelect.appendChild(placeholder);
+          items.forEach(function (item) {{
+            var option = document.createElement('option');
+            option.value = item.id;
+            option.textContent = item.label;
+            if (String(item.id) === currentSelection) {{
+              option.selected = true;
+            }}
+            strainSelect.appendChild(option);
+          }});
+        }}
+
+        function setDisabledState(message) {{
+          strainSelect.innerHTML = '<option value=\"\">Choose strain catalog reference</option>';
+          strainSelect.disabled = true;
+          hintNode.textContent = message;
+        }}
+
+        function loadStrains() {{
+          var category = categorySelect.value || '';
+          var name = (nameInput.value || '').trim();
+          currentSelection = strainSelect.value || currentSelection;
+          if (category !== 'Flower' && category !== 'Concentrates') {{
+            setDisabledState('Leafly strain references are only needed for flower and concentrates.');
+            return;
+          }}
+          strainSelect.disabled = false;
+          hintNode.textContent = name
+            ? 'Loading the most relevant strain references for this product name.'
+            : 'Showing a shorter starter list. Keep typing to narrow it down.';
+          var currentRequest = ++requestCounter;
+          fetch('/leafly/search?query=' + encodeURIComponent(name) + '&category=' + encodeURIComponent(category), {{
+            headers: {{ Accept: 'application/json' }}
+          }})
+            .then(function (response) {{ return response.ok ? response.json() : null; }})
+            .then(function (payload) {{
+              if (!payload || currentRequest !== requestCounter) {{
+                return;
+              }}
+              renderChoices(payload.matches || []);
+              hintNode.textContent = payload.note || 'Choose the closest strain reference.';
+            }})
+            .catch(function () {{
+              if (currentRequest !== requestCounter) {{
+                return;
+              }}
+              hintNode.textContent = 'Unable to load strain references right now.';
+            }});
+        }}
+
+        function scheduleLoad() {{
+          window.clearTimeout(searchTimer);
+          searchTimer = window.setTimeout(loadStrains, 180);
+        }}
+
+        nameInput.addEventListener('input', scheduleLoad);
+        categorySelect.addEventListener('change', scheduleLoad);
+        strainSelect.addEventListener('change', function () {{
+          currentSelection = strainSelect.value || '';
+        }});
+        scheduleLoad();
       }})();
     </script>
     """
@@ -10423,6 +10575,16 @@ def handle_delete_product(environ, start_response, connection, user):
     if linked_ticket:
         return redirect(start_response, "/admin?message=Product is tied to past orders and cannot be deleted")
     connection.execute("DELETE FROM cart_items WHERE product_id = ?", (product_id,))
+    launch_menu_names = {item["name"].lower() for item in LAUNCH_MENU}
+    if (product["name"] or "").lower() in launch_menu_names:
+        connection.execute(
+            """
+            INSERT INTO deleted_seed_products (name, deleted_at)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET deleted_at = excluded.deleted_at
+            """,
+            (product["name"], now_iso()),
+        )
     connection.execute("DELETE FROM products WHERE id = ?", (product_id,))
     detail = f"Deleted catalog item {product['name']}."
     if reason:
@@ -11793,6 +11955,38 @@ def serve_lab_analysis(environ, start_response, connection):
     return json_response(start_response, payload)
 
 
+def serve_leafly_search(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
+    if gate:
+        return gate
+    params = query_params(environ)
+    matches = search_leafly_references(
+        connection,
+        params.get("query", ""),
+        params.get("category", ""),
+    )
+    category = (params.get("category", "") or "").strip().title()
+    if category not in {"Flower", "Concentrates"}:
+        note = "Leafly strain references are only used for flower and concentrates."
+    elif params.get("query", "").strip():
+        note = f"Showing {len(matches)} strain references ranked by the typed product name."
+    else:
+        note = f"Showing {len(matches)} starter strain references. Type a product name to narrow them down."
+    return json_response(
+        start_response,
+        {
+            "matches": [
+                {
+                    "id": row["id"],
+                    "label": f"{row['name']} ({row['strain_type']} | THC {row['thc_percent'] or 'pending'})",
+                }
+                for row in matches
+            ],
+            "note": note,
+        },
+    )
+
+
 def serve_budtender_recommendations(environ, start_response, connection):
     params = query_params(environ)
     matches = budtender_recommendations(
@@ -11900,6 +12094,8 @@ def application(environ, start_response):
             return text_response(start_response, render_menu_page(connection, user=user, message=message, filters=params))
         if path == "/lab-analysis" and method == "GET":
             return serve_lab_analysis(environ, start_response, connection)
+        if path == "/leafly/search" and method == "GET":
+            return serve_leafly_search(environ, start_response, connection, user)
         if path == "/budtender/recommendations" and method == "GET":
             return serve_budtender_recommendations(environ, start_response, connection)
         if path == "/login":
