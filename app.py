@@ -563,6 +563,42 @@ SUB_MENU_LABEL_OPTIONS = {
     "Edibles": ["Edibles", "Syrup"],
     "General": ["General"],
 }
+LEGACY_FLOWER_SEED_NAMES = [
+    "Afghan Kush DS 7G",
+    "Animal Mints DS 7G",
+    "Biscotti DS 7G",
+    "Biscotti DS 7G Reserve",
+    "Blue Dream DS 7G",
+    "Blue Dream OZ",
+    "Blue Dream Reserve DS 7G",
+    "Durban Poison DS 7G",
+    "GMO Cookies DS 7G",
+    "GMO Cookies Reserve DS 7G",
+    "Gelato DS 7G",
+    "Gelato Reserve DS 7G",
+    "Gelatti DS 7G",
+    "Gelatti Reserve DS 7G",
+    "Ice Cream Cake DS 7G",
+    "Ice Cream Cake DS 7G Reserve",
+    "Jack Herer DS 7G",
+    "LA Confidential DS 7G",
+    "Mimosa DS 7G",
+    "Mimosa DS 7G Reserve",
+    "Mimosa Smalls DS 7G",
+    "Northern Lights DS 7G",
+    "OG Kush DS 7G",
+    "OG Kush DS 7G Reserve",
+    "OG Kush Platinum DS 7G",
+    "Pineapple Express DS 7G",
+    "Purple Haze DS 7G",
+    "Sour Candy DS 7G",
+    "Sundae Driver DS 7G",
+    "Super Sour Diesel DS 7G",
+    "Wedding Cake DS 7G",
+    "Wedding Cake DS 7G Reserve",
+    "White Widow DS 7G",
+    "White Widow Smalls DS 7G",
+]
 FLOWER_LAUNCH_SPECS = [
     ("White fire", 15.50, 10, "Pipe Dream", "https://www.leafly.com/strains/pipe-dream"),
     ("Mendo berries", 15.50, 10, "Wicked Glue", "https://www.leafly.com/strains/wicked-glue"),
@@ -2584,14 +2620,15 @@ def sync_launch_menu(connection):
         row["name"].lower()
         for row in connection.execute("SELECT name FROM deleted_seed_products").fetchall()
     }
-    connection.execute(
-        f"""
-        DELETE FROM products
-        WHERE category = 'Flower'
-          AND name NOT IN ({",".join("?" for _ in flower_launch_names)})
-        """,
-        tuple(sorted(flower_launch_names)),
-    )
+    if LEGACY_FLOWER_SEED_NAMES:
+        connection.execute(
+            f"""
+            DELETE FROM products
+            WHERE category = 'Flower'
+              AND name IN ({",".join("?" for _ in LEGACY_FLOWER_SEED_NAMES)})
+            """,
+            tuple(LEGACY_FLOWER_SEED_NAMES),
+        )
     for item in LAUNCH_MENU:
         if item["name"].lower() in deleted_seed_names:
             continue
