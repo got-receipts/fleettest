@@ -1602,6 +1602,32 @@ def payment_method_label(payment_method):
     return PAYMENT_METHOD_LABELS.get((payment_method or "").upper(), "Payment")
 
 
+def build_leafly_backed_product_description(name, category, selected_leafly):
+    if selected_leafly:
+        parts = []
+        strain_type = normalize_strain_type(selected_leafly["strain_type"] or "Unspecified")
+        if category in {"Flower", "Concentrates"} and strain_type != "Unspecified":
+            parts.append(f"{strain_type} strain reference for {name}.")
+        else:
+            parts.append(f"{name} with BudHub-linked Leafly strain reference.")
+        if selected_leafly["thc_percent"]:
+            parts.append(f"THC {selected_leafly['thc_percent']}.")
+        if selected_leafly["cbd_percent"]:
+            parts.append(f"CBD {selected_leafly['cbd_percent']}.")
+        if selected_leafly["dominant_terpene"]:
+            parts.append(f"Dominant terpene: {selected_leafly['dominant_terpene']}.")
+        if selected_leafly["effects"]:
+            parts.append(f"Reported effects: {selected_leafly['effects']}.")
+        return " ".join(parts)
+    if category == "Flower":
+        return f"Flower menu option for {name}."
+    if category == "Concentrates":
+        return f"Concentrate menu option for {name}."
+    if category == "Edibles":
+        return f"Edible menu option for {name}."
+    return f"BudHub menu item for {name}."
+
+
 def seed_payment_destinations(connection):
     for method, display_name, account_name, payment_link, sort_order, active in DEFAULT_PAYMENT_DESTINATIONS:
         existing = connection.execute(
@@ -6192,7 +6218,6 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
           </label>
           <label>Price<input type="number" name="price" min="0.01" step="0.01" required></label>
           <label>Stock<input type="number" name="stock" min="0" required></label>
-          <label>Description<textarea name="description" required></textarea></label>
           <button type="submit">Create Menu Item</button>
         </form>
       </div>
@@ -10515,7 +10540,8 @@ def handle_create_product(environ, start_response, connection, user):
         return gate
     data = read_post_data(environ)
     category = data.get("category", "General") or "General"
-    menu_group, default_strain_type = infer_product_metadata(data.get("name", ""), category, data.get("description", ""))
+    product_name = data.get("name", "")
+    menu_group, default_strain_type = infer_product_metadata(product_name, category, "")
     selected_leafly = None
     leafly_id = int(data.get("leafly_strain_id", "0") or "0")
     if leafly_id:
@@ -10523,6 +10549,7 @@ def handle_create_product(environ, start_response, connection, user):
     strain_type = normalize_strain_type(data.get("strain_type") or default_strain_type or "Unspecified")
     if selected_leafly and category in {"Flower", "Concentrates"}:
         strain_type = normalize_strain_type(selected_leafly["strain_type"] or strain_type)
+    description = build_leafly_backed_product_description(product_name, category, selected_leafly)
     connection.execute(
         """
         INSERT INTO products (
@@ -10531,9 +10558,9 @@ def handle_create_product(environ, start_response, connection, user):
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            data.get("name", ""),
+            product_name,
             category,
-            data.get("description", ""),
+            description,
             selected_leafly["image_url"] if selected_leafly else None,
             selected_leafly["source_url"] if selected_leafly else None,
             selected_leafly["name"] if selected_leafly else None,
