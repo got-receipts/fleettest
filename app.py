@@ -6192,12 +6192,6 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
           </label>
           <label>Price<input type="number" name="price" min="0.01" step="0.01" required></label>
           <label>Stock<input type="number" name="stock" min="0" required></label>
-          <label>THC<input type="text" name="thc_content" placeholder="Example: 28% or 100mg"></label>
-          <label>CBD<input type="text" name="cbd_content" placeholder="Example: 0.8% or 10mg"></label>
-          <label>Servings<input type="text" name="servings" placeholder="Example: 10 servings"></label>
-          <label>Net Weight<input type="text" name="net_weight" placeholder="Example: 3.5g, 1 oz, 100ml"></label>
-          <label>Package ID<input type="text" name="package_id" placeholder="Optional package or batch code"></label>
-          <label>Tier Pricing<textarea name="tier_prices" placeholder="One per line, like:&#10;1g = 10&#10;1/8 oz = 35&#10;1 oz = 180"></textarea></label>
           <label>Description<textarea name="description" required></textarea></label>
           <button type="submit">Create Menu Item</button>
         </form>
