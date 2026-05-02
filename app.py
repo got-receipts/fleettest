@@ -3675,8 +3675,17 @@ def render_lab_analysis_script():
         var effectsNode = document.getElementById('lab-analysis-effects');
         var noteNode = document.getElementById('lab-analysis-note');
 
+        function syncPageScrollState() {
+          if (document.querySelector('#age-gate-modal:not(.is-hidden)')) {
+            document.body.style.overflow = 'hidden';
+            return;
+          }
+          document.body.style.overflow = '';
+        }
+
         function closeModal() {
           modal.classList.add('is-hidden');
+          syncPageScrollState();
         }
 
         function setAnalysis(data) {
@@ -3700,6 +3709,7 @@ def render_lab_analysis_script():
               note: 'Pulling Leafly profile data now.'
             });
             modal.classList.remove('is-hidden');
+            syncPageScrollState();
             fetch('/lab-analysis?product_id=' + encodeURIComponent(button.dataset.productId), {
               headers: { 'Accept': 'application/json' }
             })
@@ -3724,6 +3734,7 @@ def render_lab_analysis_script():
             closeModal();
           }
         });
+        syncPageScrollState();
       })();
     </script>
     """
@@ -3767,6 +3778,14 @@ def render_menu_interaction_script():
     return """
     <script>
       (function () {
+        function syncPageScrollState() {
+          if (document.querySelector('#age-gate-modal:not(.is-hidden)')) {
+            document.body.style.overflow = 'hidden';
+            return;
+          }
+          document.body.style.overflow = '';
+        }
+
         document.querySelectorAll('[data-quantity-stepper]').forEach(function (stepper) {
           if (stepper.dataset.quantityReady === 'yes') {
             return;
@@ -3862,6 +3881,7 @@ def render_menu_interaction_script():
             activeLabTrigger = document.querySelector('[data-open-lab-analysis][data-product-id="' + button.dataset.productId + '"]');
             labButton.classList.toggle('is-hidden', !activeLabTrigger);
             detailModal.classList.remove('is-hidden');
+            syncPageScrollState();
           });
         });
 
@@ -3869,6 +3889,7 @@ def render_menu_interaction_script():
           labButton.addEventListener('click', function () {
             if (activeLabTrigger) {
               detailModal.classList.add('is-hidden');
+              syncPageScrollState();
               activeLabTrigger.click();
             }
           });
@@ -3878,9 +3899,11 @@ def render_menu_interaction_script():
           detailModal.querySelectorAll('[data-close-product-detail]').forEach(function (node) {
             node.addEventListener('click', function () {
               detailModal.classList.add('is-hidden');
+              syncPageScrollState();
             });
           });
         }
+        syncPageScrollState();
       })();
     </script>
     """
@@ -10564,16 +10587,38 @@ def handle_create_product(environ, start_response, connection, user):
         return gate
     data = read_post_data(environ)
     category = data.get("category", "General") or "General"
-    product_name = data.get("name", "")
+    product_name = data.get("name", "").strip()
+    if not product_name:
+        return redirect(start_response, "/admin?message=Product name is required")
+    try:
+        price = float(data.get("price", "0") or "0")
+    except ValueError:
+        return redirect(start_response, "/admin?message=Price must be a valid number")
+    try:
+        stock = int(data.get("stock", "0") or "0")
+    except ValueError:
+        return redirect(start_response, "/admin?message=Stock must be a whole number")
+    if price <= 0:
+        return redirect(start_response, "/admin?message=Price must be greater than zero")
+    if stock < 0:
+        return redirect(start_response, "/admin?message=Stock cannot be negative")
     menu_group, default_strain_type = infer_product_metadata(product_name, category, "")
     selected_leafly = None
-    leafly_id = int(data.get("leafly_strain_id", "0") or "0")
+    try:
+        leafly_id = int(data.get("leafly_strain_id", "0") or "0")
+    except ValueError:
+        leafly_id = 0
     if leafly_id:
         selected_leafly = connection.execute("SELECT * FROM leafly_strains WHERE id = ?", (leafly_id,)).fetchone()
+    if category in {"Flower", "Concentrates"} and not selected_leafly:
+        selected_leafly = infer_leafly_reference(connection, product_name)
     strain_type = normalize_strain_type(data.get("strain_type") or default_strain_type or "Unspecified")
     if selected_leafly and category in {"Flower", "Concentrates"}:
         strain_type = normalize_strain_type(selected_leafly["strain_type"] or strain_type)
     description = build_leafly_backed_product_description(product_name, category, selected_leafly)
+    existing = connection.execute("SELECT id FROM products WHERE lower(name) = lower(?)", (product_name,)).fetchone()
+    if existing:
+        return redirect(start_response, "/admin?message=That menu item already exists")
     connection.execute(
         """
         INSERT INTO products (
@@ -10588,8 +10633,8 @@ def handle_create_product(environ, start_response, connection, user):
             selected_leafly["image_url"] if selected_leafly else None,
             selected_leafly["source_url"] if selected_leafly else None,
             selected_leafly["name"] if selected_leafly else None,
-            float(data.get("price", "0")),
-            int(data.get("stock", "0")),
+            price,
+            stock,
             data.get("menu_group", "").strip() or menu_group,
             "" if category not in {"Flower", "Concentrates"} else strain_type,
             data.get("thc_content", "").strip(),
