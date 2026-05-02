@@ -557,6 +557,12 @@ MENU_SECTION_NOTES = {
     "Concentrates": "Concentrate options are listed by jar size.",
     "Flower": "Flower shows the current BudHub flower lineup and price tiers.",
 }
+SUB_MENU_LABEL_OPTIONS = {
+    "Flower": ["Flower", "Double Stuffed", "Full Ounce"],
+    "Concentrates": ["Concentrates", "Diamonds", "Syrup"],
+    "Edibles": ["Edibles", "Syrup"],
+    "General": ["General"],
+}
 FLOWER_LAUNCH_SPECS = [
     ("White fire", 15.50, 10, "Pipe Dream", "https://www.leafly.com/strains/pipe-dream"),
     ("Mendo berries", 15.50, 10, "Wicked Glue", "https://www.leafly.com/strains/wicked-glue"),
@@ -6201,7 +6207,11 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
               <option value="General">General</option>
             </select>
           </label>
-          <label>Sub Menu Label<input type="text" name="menu_group" placeholder="Example: Double Stuffed 7G, Diamonds, Syrup"></label>
+          <label>Sub Menu Label
+            <select name="menu_group" data-menu-group-select="yes">
+              <option value="">Use category default</option>
+            </select>
+          </label>
           <label>Strain Type
             <select name="strain_type">
               <option value="Unspecified">Unspecified</option>
@@ -6268,6 +6278,7 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
     </div>
     <script>
       (function () {{
+        var subMenuOptions = {json.dumps(SUB_MENU_LABEL_OPTIONS)};
         [
           ['open-create-account-widget', 'create-account-widget-modal', 'data-close-create-account-widget'],
           ['open-create-product-widget', 'create-product-widget-modal', 'data-close-create-product-widget'],
@@ -6296,13 +6307,30 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
         var nameInput = productModal.querySelector('[data-leafly-product-name="yes"]');
         var categorySelect = productModal.querySelector('[data-leafly-category="yes"]');
         var strainSelect = productModal.querySelector('[data-leafly-select="yes"]');
+        var menuGroupSelect = productModal.querySelector('[data-menu-group-select="yes"]');
         var hintNode = productModal.querySelector('[data-leafly-hint="yes"]');
-        if (!nameInput || !categorySelect || !strainSelect || !hintNode) {{
+        if (!nameInput || !categorySelect || !strainSelect || !menuGroupSelect || !hintNode) {{
           return;
         }}
         var searchTimer = null;
         var requestCounter = 0;
         var currentSelection = '';
+
+        function renderMenuGroups() {{
+          var category = categorySelect.value || 'General';
+          var options = subMenuOptions[category] || ['General'];
+          var currentValue = menuGroupSelect.value || '';
+          menuGroupSelect.innerHTML = '<option value=\"\">Use category default</option>';
+          options.forEach(function (label) {{
+            var option = document.createElement('option');
+            option.value = label;
+            option.textContent = label;
+            if (label === currentValue) {{
+              option.selected = true;
+            }}
+            menuGroupSelect.appendChild(option);
+          }});
+        }}
 
         function renderChoices(items) {{
           var placeholder = document.createElement('option');
@@ -6365,10 +6393,14 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
         }}
 
         nameInput.addEventListener('input', scheduleLoad);
-        categorySelect.addEventListener('change', scheduleLoad);
+        categorySelect.addEventListener('change', function () {{
+          renderMenuGroups();
+          scheduleLoad();
+        }});
         strainSelect.addEventListener('change', function () {{
           currentSelection = strainSelect.value || '';
         }});
+        renderMenuGroups();
         scheduleLoad();
       }})();
     </script>
