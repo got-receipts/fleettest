@@ -6212,14 +6212,6 @@ def render_admin_creation_widgets(leafly_strains, coupons, products):
               <option value="">Use category default</option>
             </select>
           </label>
-          <label>Strain Type
-            <select name="strain_type">
-              <option value="Unspecified">Unspecified</option>
-              <option value="Sativa">Sativa</option>
-              <option value="Indica">Indica</option>
-              <option value="Hybrid">Hybrid</option>
-            </select>
-          </label>
           <label>Leafly Strain
             <select name="leafly_strain_id" data-leafly-select="yes">
               <option value="">Choose strain catalog reference</option>
